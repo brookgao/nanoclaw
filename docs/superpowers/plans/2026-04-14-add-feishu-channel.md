@@ -37,10 +37,10 @@
 
 Run:
 ```bash
-npm install @larksuiteoapi/node-sdk@^1.47.0
+npm install @larksuiteoapi/node-sdk@^1.60.0
 ```
 
-Expected: `package.json` gains `"@larksuiteoapi/node-sdk": "^1.47.0"` under `dependencies`; `package-lock.json` updated.
+Expected: `package.json` gains `"@larksuiteoapi/node-sdk": "^1.60.0"` under `dependencies`; `package-lock.json` updated. (Verified: 1.60.0 is the latest published version as of 2026-04-14.)
 
 - [ ] **Step 2: Extend `.env.example`**
 
@@ -429,16 +429,57 @@ npx vitest run src/channels/feishu.test.ts
 ```
 Expected: FAIL — `ch.handleEvent is not a function`.
 
-- [ ] **Step 3: Implement `handleEvent` + dispatching**
+- [ ] **Step 3: Implement `handleEvent` + dispatching (with self-filter, dedup, safe mention strip, metadata emit)**
 
-In `src/channels/feishu.ts`, add inside `FeishuChannel`:
+In `src/channels/feishu.ts`, add a dedup LRU field and import `NewMessage`:
 
 ```ts
+import { Channel, NewMessage } from '../types.js';
+```
+
+Inside `FeishuChannel`:
+
+```ts
+private seenMessageIds = new Set<string>();
+private seenOrder: string[] = [];
+private readonly DEDUP_CAP = 500;
+
+private remember(id: string): boolean {
+  if (this.seenMessageIds.has(id)) return false;
+  this.seenMessageIds.add(id);
+  this.seenOrder.push(id);
+  if (this.seenOrder.length > this.DEDUP_CAP) {
+    const evicted = this.seenOrder.shift()!;
+    this.seenMessageIds.delete(evicted);
+  }
+  return true;
+}
+
 // Exposed for tests; also called from WS event handler.
 handleEvent(payload: any): void {
   const ev = payload?.event;
   if (!ev?.message) return;
   const m = ev.message;
+
+  // 1) Self-filter: drop messages sent BY the bot / any app.
+  const senderType: string = ev.sender?.sender_type ?? '';
+  const senderOpenId: string = ev.sender?.sender_id?.open_id ?? '';
+  if (senderType !== 'user') {
+    logger.debug(`[feishu] drop non-user sender_type=${senderType}`);
+    return;
+  }
+  if (this.botOpenId && senderOpenId === this.botOpenId) {
+    logger.debug('[feishu] drop self-message');
+    return;
+  }
+
+  // 2) Dedup on message_id (WS reconnect replay guard).
+  if (!this.remember(m.message_id)) {
+    logger.debug(`[feishu] dedup hit message_id=${m.message_id}`);
+    return;
+  }
+
+  // 3) Only text.
   if (m.message_type !== 'text') {
     logger.debug(`[feishu] ignore non-text message_type=${m.message_type}`);
     return;
@@ -454,37 +495,50 @@ handleEvent(payload: any): void {
 
   const chatId: string = m.chat_id;
   const chatType: string = m.chat_type;
-  const senderOpenId: string = ev.sender?.sender_id?.open_id ?? 'unknown';
+  const mentions: Array<{ key?: string; id?: { open_id?: string } }> = m.mentions ?? [];
 
   if (chatType === 'p2p') {
-    this.deliver(chatId, m.message_id, senderOpenId, text, payload.header?.create_time);
+    this.deliver(chatId, m.message_id, senderOpenId, text, payload.header?.create_time, false);
     return;
   }
 
   if (chatType === 'group') {
-    const mentions: Array<{ id?: { open_id?: string } }> = m.mentions ?? [];
-    const mentioned = this.botOpenId
-      ? mentions.some((x) => x.id?.open_id === this.botOpenId)
-      : mentions.length > 0; // fallback before bot identity resolved
-    if (!mentioned) {
+    if (!this.botOpenId) {
+      logger.debug('[feishu] group msg before botOpenId resolved, ignored');
+      return;
+    }
+    const botMention = mentions.find((x) => x.id?.open_id === this.botOpenId);
+    if (!botMention) {
       logger.debug(`[feishu] group msg without @bot, ignored chat=${chatId}`);
       return;
     }
-    // Strip the @bot mention text (`@_user_1` tokens) from message.
-    const cleaned = text.replace(/@_user_\d+\s*/g, '').trim();
-    this.deliver(chatId, m.message_id, senderOpenId, cleaned, payload.header?.create_time);
+    // Strip ONLY the bot's exact mention token (e.g. "@_user_1"), never other users'.
+    let cleaned = text;
+    if (botMention.key) {
+      cleaned = cleaned.split(botMention.key).join('').trim();
+    }
+    this.deliver(chatId, m.message_id, senderOpenId, cleaned, payload.header?.create_time, true);
     return;
   }
 }
 
-private deliver(chatId: string, messageId: string, senderOpenId: string, content: string, createTime?: string) {
+private deliver(
+  chatId: string,
+  messageId: string,
+  senderOpenId: string,
+  content: string,
+  createTime: string | undefined,
+  isGroup: boolean,
+): void {
   const jid = `${JID_PREFIX}${chatId}`;
   const ts = createTime ? new Date(Number(createTime)).toISOString() : new Date().toISOString();
+  // Emit metadata first so orchestrator can auto-register unknown chats.
+  this.opts.onChatMetadata(jid, ts, undefined, 'feishu', isGroup);
   const msg: NewMessage = {
     id: messageId,
     chat_jid: jid,
     sender: senderOpenId,
-    sender_name: senderOpenId, // resolved later via contact API; Task 9 (deferred)
+    sender_name: senderOpenId, // resolved later via contact API if needed (deferred)
     content,
     timestamp: ts,
   };
@@ -492,7 +546,7 @@ private deliver(chatId: string, messageId: string, senderOpenId: string, content
 }
 ```
 
-Also import `NewMessage` if not already.
+Update existing test from Step 1 to also assert `onChatMetadata` was called once with `(jid, ts, undefined, 'feishu', false)` for p2p. Add the `onChatMetadata` spy to the opts in all tests.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -527,7 +581,7 @@ describe('FeishuChannel inbound group', () => {
     process.env.FEISHU_APP_SECRET = 'secret_test';
   });
 
-  it('delivers group message when bot is @-mentioned', () => {
+  it('delivers group message when bot is @-mentioned and strips only bot mention', () => {
     const onMessage = vi.fn();
     const factory = getChannelFactory('feishu')!;
     const ch = factory({
@@ -540,14 +594,56 @@ describe('FeishuChannel inbound group', () => {
     ch.handleEvent(makeEvent({
       chat_id: 'oc_g1',
       chat_type: 'group',
-      text: '@_user_1 summarize',
-      mentions: [{ id: { open_id: 'ou_bot' } }],
+      text: '@_user_1 please cc @_user_2',
+      mentions: [
+        { key: '@_user_1', id: { open_id: 'ou_bot' } },
+        { key: '@_user_2', id: { open_id: 'ou_human' } },
+      ],
     }));
 
     expect(onMessage).toHaveBeenCalledTimes(1);
     const [jid, msg] = onMessage.mock.calls[0];
     expect(jid).toBe('feishu:oc_g1');
-    expect(msg.content).toBe('summarize');
+    // Only the bot's @_user_1 token stripped; @_user_2 preserved.
+    expect(msg.content).toBe('please cc @_user_2');
+  });
+
+  it('drops messages sent by the bot itself (self-loop guard)', () => {
+    const onMessage = vi.fn();
+    const factory = getChannelFactory('feishu')!;
+    const ch = factory({
+      onMessage,
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+    })! as any;
+    ch.botOpenId = 'ou_bot';
+
+    // sender_type=app (bot echo)
+    const ev = makeEvent({ chat_id: 'oc_p2p1', text: 'reply' });
+    ev.event.sender.sender_type = 'app';
+    ch.handleEvent(ev);
+    expect(onMessage).not.toHaveBeenCalled();
+
+    // Or user sender but open_id matches bot
+    const ev2 = makeEvent({ chat_id: 'oc_p2p1', sender_id: 'ou_bot' });
+    ch.handleEvent(ev2);
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('dedups on message_id (WS reconnect replay)', () => {
+    const onMessage = vi.fn();
+    const factory = getChannelFactory('feishu')!;
+    const ch = factory({
+      onMessage,
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+    })! as any;
+
+    const ev = makeEvent({ message_id: 'om_dup', text: 'once' });
+    ch.handleEvent(ev);
+    ch.handleEvent(ev);
+    ch.handleEvent(ev);
+    expect(onMessage).toHaveBeenCalledTimes(1);
   });
 
   it('ignores group message without any @mention', () => {
@@ -731,7 +827,7 @@ describe('FeishuChannel connect', () => {
     process.env.FEISHU_APP_SECRET = 'secret_test';
   });
 
-  it('starts WS, registers im.message.receive_v1 handler, and resolves bot open_id', async () => {
+  it('resolves bot open_id, starts WS, and reports connected', async () => {
     const factory = getChannelFactory('feishu')!;
     const ch = factory({
       onMessage: vi.fn(),
@@ -739,18 +835,9 @@ describe('FeishuChannel connect', () => {
       registeredGroups: () => ({}),
     })! as any;
 
-    const handlers: Record<string, Function> = {};
-    ch.ws = {
-      start: vi.fn(async ({ eventDispatcher }: any) => {
-        Object.assign(handlers, eventDispatcher.handles);
-      }),
-    };
+    ch.ws = { start: vi.fn().mockResolvedValue(undefined) };
     ch.client = {
       im: { message: { create: vi.fn() } },
-      contact: {},
-      application: {
-        applicationAppVersion: {},
-      },
       bot: {
         info: { get: vi.fn().mockResolvedValue({ bot: { open_id: 'ou_bot_resolved' } }) },
       },
@@ -760,7 +847,25 @@ describe('FeishuChannel connect', () => {
 
     expect(ch.isConnected()).toBe(true);
     expect(ch.botOpenId).toBe('ou_bot_resolved');
-    expect(ch.ws.start).toHaveBeenCalled();
+    expect(ch.ws.start).toHaveBeenCalledTimes(1);
+    // Do NOT assert on dispatcher internals — the SDK may change them between versions.
+  });
+
+  it('stays running when bot.info.get fails (warn, fall back to null open_id)', async () => {
+    const factory = getChannelFactory('feishu')!;
+    const ch = factory({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+    })! as any;
+    ch.ws = { start: vi.fn().mockResolvedValue(undefined) };
+    ch.client = {
+      bot: { info: { get: vi.fn().mockRejectedValue(new Error('403')) } },
+    };
+
+    await expect(ch.connect()).resolves.toBeUndefined();
+    expect(ch.botOpenId).toBeNull();
+    expect(ch.isConnected()).toBe(true);
   });
 });
 ```
@@ -786,11 +891,15 @@ Replace `connect()`:
 ```ts
 async connect(): Promise<void> {
   // 1) Resolve bot open_id for @mention matching.
+  // NOTE: verify SDK method path against @larksuiteoapi/node-sdk@^1.60.0 before shipping.
+  // As of 1.60 the stable path is `client.bot.info.get()`; if that is absent, fall back to
+  // a direct REST call: `this.client.request({ method: 'GET', url: '/open-apis/bot/v3/info' })`.
   try {
     const info: any = await (this.client as any).bot.info.get();
     this.botOpenId = info?.bot?.open_id ?? info?.data?.bot?.open_id ?? null;
     logger.info(`[feishu] bot open_id=${this.botOpenId}`);
   } catch (err) {
+    this.botOpenId = null;
     logger.warn(`[feishu] failed to resolve bot open_id: ${(err as Error).message}`);
   }
 
@@ -928,7 +1037,7 @@ Quick summary:
 5. 版本管理 → 创建版本 → 租户管理员审批
 6. 凭证 → 复制 App ID (`cli_xxx`) and App Secret
 
-### Configure `.env`
+### Configure `.env` and sync to container
 
 Append (or edit) `.env`:
 
@@ -938,7 +1047,42 @@ FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
 FEISHU_DOMAIN=feishu
 ```
 
-### Start nanoclaw and test
+Sync to the container env file (the container reads `data/env/env`, not `.env` directly):
+
+```bash
+mkdir -p data/env && cp .env data/env/env
+chmod 600 .env data/env/env
+```
+
+## Phase 4: Registration
+
+Register the Feishu chats with nanoclaw. For each chat you want to talk from, collect the `chat_id` (visible in the `[feishu] drop ...` / delivery logs once you send a test message, or via Feishu admin console).
+
+**Private chat (main channel — admin / self-chat):**
+
+```bash
+npx tsx setup/index.ts --step register -- \
+  --jid "feishu:<chat-id>" \
+  --name "<your-name>" \
+  --folder "feishu_main" \
+  --trigger "@${ASSISTANT_NAME}" \
+  --channel feishu \
+  --no-trigger-required \
+  --is-main
+```
+
+**Group chat:**
+
+```bash
+npx tsx setup/index.ts --step register -- \
+  --jid "feishu:<chat-id>" \
+  --name "<chat-name>" \
+  --folder "feishu_<group-name>" \
+  --trigger "@${ASSISTANT_NAME}" \
+  --channel feishu
+```
+
+## Phase 5: Start and test
 
 ```bash
 npm run dev   # or whatever the repo's run command is
@@ -949,6 +1093,24 @@ Look for log line: `[feishu] WS connected`.
 Then in Feishu:
 1. 私聊机器人 → 发 "ping"
 2. 拉机器人进群 → `@机器人 summarize` (or your trigger)
+
+### Troubleshooting checklist
+
+1. `FEISHU_APP_ID` / `FEISHU_APP_SECRET` set in `.env` AND synced to `data/env/env`
+2. Chat is registered in SQLite:
+   ```bash
+   sqlite3 store/messages.db "SELECT * FROM registered_groups WHERE jid LIKE 'feishu:%'"
+   ```
+3. App version is published and tenant-admin-approved
+
+## Uninstall
+
+1. Revert merge: `git revert -m 1 <merge-commit>` or `git reset --hard <before-merge>`
+2. Remove env vars from `.env` and `data/env/env`
+3. Remove registrations:
+   ```bash
+   sqlite3 store/messages.db "DELETE FROM registered_groups WHERE jid LIKE 'feishu:%'"
+   ```
 ```
 
 - [ ] **Step 2: Commit**
@@ -1050,12 +1212,11 @@ Expected: all tests pass, build clean.
 
 - [ ] **Step 2: Smoke-check registry includes feishu**
 
-Run:
+Run (via `tsx`, works directly on the TS source):
 ```bash
-node --input-type=module -e "import('./src/channels/index.js').then(async()=>{const {getRegisteredChannelNames}=await import('./src/channels/registry.js');console.log(getRegisteredChannelNames());})"
+FEISHU_APP_ID=x FEISHU_APP_SECRET=y npx tsx -e "import('./src/channels/index.ts').then(async()=>{const m=await import('./src/channels/registry.ts');console.log(m.getRegisteredChannelNames());})"
 ```
-(Note: run this **after** `npm run build` and from the `dist/` equivalent path if the project compiles — otherwise via `tsx`: `npx tsx -e "..."`.)
-Expected: output includes `'feishu'`.
+Expected: stdout contains `feishu` in the array.
 
 - [ ] **Step 3: Commit any cleanup**
 

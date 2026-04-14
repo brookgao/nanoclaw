@@ -1,7 +1,7 @@
 # Design: `/add-feishu` — Feishu (飞书) Channel for NanoClaw
 
 **Date:** 2026-04-14
-**Status:** Approved (design)
+**Status:** Approved — revised post-critic review (2026-04-14)
 **Scope:** Add Feishu (国内版, open.feishu.cn) as a NanoClaw channel, following the `/add-telegram` and `/add-slack` skill-as-branch pattern.
 
 ---
@@ -72,12 +72,16 @@ Same pattern as existing `/add-telegram`, `/add-slack`.
 
 | Feishu event | Condition | NanoClaw target |
 |---|---|---|
-| `im.message.receive_v1`, `chat_type == "p2p"` | any text message | **main channel** (self-chat / admin) |
-| `im.message.receive_v1`, `chat_type == "group"` | mentions bot's `open_id` | group keyed by `chat_id` |
+| `im.message.receive_v1`, `chat_type == "p2p"` | any text message from a **user** | **main channel** (self-chat / admin) |
+| `im.message.receive_v1`, `chat_type == "group"` | mentions bot's `open_id` **and** sender is a user | group keyed by `chat_id` |
 | `im.message.receive_v1`, `chat_type == "group"` | not @bot | ignored |
+| Sender is the bot itself (`sender_type == "app"` or `sender_id == botOpenId`) | any | **ignored** (prevents self-loop) |
+| `message_id` already seen in last N (LRU=500) | any | **ignored** (dedup on WS reconnect replay) |
 | Non-text `msg_type` | any | ignored in v1 (logged) |
 
-`chat_id` is the stable NanoClaw `groupId`. First time a `chat_id` is seen, orchestrator creates the group (same code path as Slack/Telegram).
+`chat_id` is the stable NanoClaw `groupId` (prefixed `feishu:` as the jid). On every inbound delivery, the channel emits `onChatMetadata(jid, timestamp, undefined, 'feishu', isGroup)` so the orchestrator can auto-register unknown chats (same behavior as Slack/Telegram). Group names are not fetched inline in v1 — the orchestrator resolves them later if needed.
+
+**Mention stripping:** To clean `@bot` out of the text, walk `message.mentions[]`, find the entry with `id.open_id === botOpenId`, read its `key` (e.g. `@_user_1`), and strip **only that exact token**. Never blanket-strip all `@_user_N` — that destroys user-authored mentions of humans.
 
 ---
 
@@ -109,7 +113,7 @@ client.im.message.create({
 });
 ```
 
-Group replies include a leading `<at user_id="..."></at>` mention of the original sender. Toggleable later; default on.
+Group replies are plain text in v1 — **no automatic `<at>` of the sender** (YAGNI; add later if users ask).
 
 ---
 
