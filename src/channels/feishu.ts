@@ -2,6 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { Channel, NewMessage } from '../types.js';
 import { logger } from '../logger.js';
+import { readEnvFile } from '../env.js';
 
 const JID_PREFIX = 'feishu:';
 
@@ -207,10 +208,14 @@ export class FeishuChannel implements Channel {
 }
 
 export function createFeishuChannel(opts: ChannelOpts): Channel | null {
-  const appId = process.env.FEISHU_APP_ID;
-  const appSecret = process.env.FEISHU_APP_SECRET;
+  // Project convention: read .env via readEnvFile (secrets not loaded into process.env).
+  // Fall back to process.env for tests that set env vars directly.
+  const fileEnv = readEnvFile(['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'FEISHU_DOMAIN']);
+  const appId = fileEnv.FEISHU_APP_ID || process.env.FEISHU_APP_ID;
+  const appSecret = fileEnv.FEISHU_APP_SECRET || process.env.FEISHU_APP_SECRET;
   if (!appId || !appSecret) return null;
-  const domain: Domain = process.env.FEISHU_DOMAIN === 'lark' ? 'lark' : 'feishu';
+  const domainRaw = fileEnv.FEISHU_DOMAIN || process.env.FEISHU_DOMAIN;
+  const domain: Domain = domainRaw === 'lark' ? 'lark' : 'feishu';
   logger.info({ domain }, '[feishu] channel enabled');
   return new FeishuChannel(appId, appSecret, opts, domain);
 }

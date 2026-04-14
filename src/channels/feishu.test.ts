@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { getChannelFactory } from './registry.js';
 
+// Stub readEnvFile so tests don't read the real ./.env.
+vi.mock('../env.js', () => ({
+  readEnvFile: () => ({}),
+}));
+
 // Import triggers self-registration
 import './feishu.js';
 
