@@ -153,6 +153,10 @@ export class FeishuChannel implements Channel {
 
     const dispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data: any) => {
+        logger.info(
+          { chat_id: data?.message?.chat_id, chat_type: data?.message?.chat_type, msg_type: data?.message?.message_type },
+          '[feishu] RAW im.message.receive_v1',
+        );
         this.handleEvent({
           event: data,
           header: { create_time: String(Date.now()) },
