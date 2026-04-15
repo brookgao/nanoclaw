@@ -10,14 +10,14 @@ Your full personality, project context, and detailed workflow rules are in `soul
 - Be resourceful before asking.
 - 所有代码操作必须通过 tmux 会话 `dev-claude` 操控 Claude Code（见 soul.md 详情）。
 
-## Reference Files
+## Startup Reading List
 
-- `soul.md` — full personality, project role, tmux workflow, validation rules, 飞书 IDs
-- `user-context.md` — info about your human
-- `memories.md` — durable facts/decisions
-- `daily-memories/` — historical daily observations (2026-03-21 through 2026-04-02)
+On every session start, read these files in order:
+1. `soul.md` — identity, project role, tmux workflow, quality rules
+2. `/workspace/group/wiki/index.md` — knowledge base overview
+3. `/workspace/group/memory/facts.md` — persistent facts
 
-Consult these when context is needed; don't load them on every turn.
+Other files (`memory/session-learnings.md`, specific wiki pages) — read when relevant, not every time.
 
 ---
 
@@ -53,14 +53,54 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+## Wiki Knowledge Management
+
+You have a persistent wiki at `/workspace/group/wiki/`. It's your long-term knowledge base.
+
+### Search First
+Before reading code or asking dev-claude, search the wiki:
+```bash
+sqlite3 /workspace/project/store/messages.db \
+  "SELECT path, snippet(wiki_fts,3,'→','←','...',20) FROM wiki_fts WHERE wiki_fts MATCH 'keywords' ORDER BY rank LIMIT 5;"
+```
+Search returns relative paths like `wiki/nine/architecture.md`. Read them at `/workspace/group/<path>`. Nothing found → fall back to tmux bridge or code.
+
+### Write Rules
+After creating or updating any wiki page, always:
+1. Update `/workspace/group/wiki/index.md` (add/modify the entry)
+2. Upsert the FTS5 index:
+```bash
+sqlite3 /workspace/project/store/messages.db "DELETE FROM wiki_fts WHERE path='<relative-path>';"
+sqlite3 /workspace/project/store/messages.db "INSERT INTO wiki_fts(path,title,summary,body) VALUES('<path>','<title>','<summary>','<body>');"
+```
+3. Append one line to `/workspace/group/wiki/log.md`: `[YYYY-MM-DD] <action>: <path> — <description>`
+4. Page format: title + one-line summary (blockquote) + body + `## Related` (cross-references)
+
+### Memory Fencing
+When injecting wiki or memory content into your context, wrap it:
+```
+<memory-context source="wiki/nine/architecture.md">
+Content here...
+</memory-context>
+```
+
+### Post-Task Ingest
+After completing a dev task via tmux bridge, review what changed:
+1. Architecture changes → create/update `/workspace/group/wiki/decisions/`
+2. Bug lessons → create/update `/workspace/group/wiki/learnings/`
+3. Module changes → update `/workspace/group/wiki/nine/`
+4. Extract lesson → append to `/workspace/group/memory/session-learnings.md`
+5. Extract durable facts → append to `/workspace/group/memory/facts.md`
+Skip trivial changes (typos, formatting).
+
+### Manual Ingest
+When user says "ingest", "记到 wiki", or "record this":
+Read the content → write to appropriate wiki category → update index + FTS5 + log.
+
 ## Memory
 
-The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
-
-When you learn something important:
-- Create files for structured data (e.g., `customers.md`, `preferences.md`)
-- Split files larger than 500 lines into folders
-- Keep an index in your memory for the files you create
+- `/workspace/group/memory/facts.md` — persistent facts about user, team, conventions. Bullet + date. Read on startup.
+- `/workspace/group/memory/session-learnings.md` — post-task learnings (conclusion + lesson + next-time). When 10+ entries accumulate, promote valuable ones to wiki pages and clean up.
 
 ## Message Formatting
 
