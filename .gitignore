@@ -13,10 +13,15 @@ logs/
 groups/*
 !groups/main/
 !groups/global/
+!groups/feishu_main/
 groups/main/*
 groups/global/*
+groups/feishu_main/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
+!groups/feishu_main/CLAUDE.md
+!groups/feishu_main/wiki/
+!groups/feishu_main/memory/
 
 # Secrets
 *.keys.json
