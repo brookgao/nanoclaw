@@ -84,6 +84,17 @@ function createSchema(database: Database.Database): void {
     );
   `);
 
+  // Wiki full-text search index
+  database.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
+      path,
+      title,
+      summary,
+      body,
+      tokenize='porter unicode61'
+    );
+  `);
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
