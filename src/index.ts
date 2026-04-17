@@ -8,7 +8,6 @@ import {
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
-  IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   ONECLI_URL,
   POLL_INTERVAL,
@@ -21,6 +20,7 @@ import {
 } from './channels/registry.js';
 import {
   ContainerOutput,
+  resolveIdleMs,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
@@ -268,15 +268,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
+  const idleMs = resolveIdleMs(group);
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       logger.debug(
-        { group: group.name },
+        { group: group.name, idleMs },
         'Idle timeout, closing container stdin',
       );
       queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
+    }, idleMs);
   };
 
   await channel.setTyping?.(chatJid, true);
@@ -730,6 +731,12 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    onAgentEvent: async (jid, event) => {
+      const channel = findChannel(channels, jid);
+      if (channel?.onAgentEvent) {
+        await channel.onAgentEvent(jid, event);
+      }
+    },
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({
