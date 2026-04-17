@@ -29,7 +29,17 @@ export interface AllowedRoot {
 
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
-  timeout?: number; // Default: 300000 (5 minutes)
+  timeout?: number; // Default: 300000 (5 minutes). Hard kill threshold.
+  // Per-group env vars passed to the container as `docker run -e KEY=VAL`.
+  // Use for things like GH_TOKEN that the agent's bash subprocess needs.
+  // Note: settings.json env is for Claude Code SDK only — does not propagate to bash tool.
+  extraEnv?: Record<string, string>;
+  // Per-group idle timeout (ms). When set, overrides global IDLE_TIMEOUT for
+  // both the host-side stdin-close timer and the container hard-kill floor.
+  idleTimeout?: number;
+  // Per-group Claude SDK auto-compact threshold (tokens). When set, overrides
+  // the container default (120000). Lower = compact earlier (context healthier).
+  autoCompactWindow?: number;
 }
 
 export interface RegisteredGroup {
@@ -82,6 +92,23 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+// --- Agent event telemetry ---
+
+export type AgentEvent = {
+  type: 'agent_event';
+  chatJid: string;
+  runId: string; // uuid generated at start of each run
+  seq: number; // monotonic per runId
+  timestamp: number; // Date.now()
+  kind: 'start' | 'tool_use' | 'tool_result' | 'assistant_text' | 'final';
+  // kind=start: {prompt: string}
+  // kind=tool_use: {tool: string, args: any, toolUseId: string}
+  // kind=tool_result: {toolUseId: string, status: 'done'|'error', textPreview?: string}
+  // kind=assistant_text: {text: string}
+  // kind=final: {text: string, elapsedMs: number}
+  payload: Record<string, any>;
+};
+
 // --- Channel abstraction ---
 
 export interface Channel {
@@ -95,6 +122,8 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: receive agent lifecycle events (tool calls, final result, etc.)
+  onAgentEvent?(jid: string, event: AgentEvent): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

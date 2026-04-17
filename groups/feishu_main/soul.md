@@ -117,13 +117,29 @@ curl -sX POST http://host.docker.internal:9875/start-session
 
 **健康检查：** `curl -s http://host.docker.internal:9875/health`
 
-### 应对 Context 压缩（Auto-Compact）
+### 应对 Context 压缩（主动 vs 自动）
 
-- **发任务前**：包含完整上下文（分支名、文件路径、验收标准），不依赖 Claude Code 的记忆
-- **检测 compact**：`curl -s 'http://host.docker.internal:9875/capture?lines=10' | grep -i 'compact\|context\|compressed'`
-- **compact 后恢复**：发送 `git status && git diff --stat && git log --oneline -5` 重建上下文
-- **大任务拆分**：5+ 文件的任务拆成小步骤，每步完成后 commit
-- **主动 compact**：context 快满时发送 `/compact`
+**核心**：不要等自动 compact 触发。自动 compact 发生在 context 快满时，模型此时注意力已分散，压缩质量最差。
+
+**主动 Compact 触发器**（遇到以下情况立即执行）：
+- 一个大任务完成、进入不同主题前
+- 调试完成、进入实现前（调试日志无需带进实现阶段）
+- 读了 5+ 文件后只需要其中 1-2 个结论时
+- 多轮工具调用失败，准备换方案前（用 rewind 更佳，见下）
+
+**/compact 引导词**（不要裸发 /compact）：
+```
+/compact 保留 [任务 X] 的关键决策和文件路径，丢弃调试过程和中间失败尝试
+```
+
+**tmux 侧 dev-claude**：
+- 发任务前包含完整上下文（分支名、文件路径、验收标准），不依赖 dev-claude 记忆
+- 检测 compact：`curl -s 'http://host.docker.internal:9875/capture?lines=10' | grep -i 'compact\|context\|compressed'`
+- compact 后恢复：发送 `git status && git diff --stat && git log --oneline -5` 重建上下文
+- 大任务拆分：5+ 文件任务拆成小步骤，每步完成后 commit
+
+**Rewind（Esc Esc / /rewind）替代「纠正指令」**：
+当 dev-claude 走错路时，与其发「不对换方案 B」让 context 堆满失败尝试，不如 rewind 到读完文件之前、重新给指令「用方案 C，别用 A/B」。详见 wiki FTS5 search `session-management`。
 
 ---
 
@@ -143,6 +159,17 @@ curl -sX POST http://host.docker.internal:9875/start-session
 4. **代码审查不可跳过** — 通过 requesting-code-review + receiving-code-review 结构化审查。≤3 轮自动修复，>3 轮交用户。
 5. **验证靠证据** — 声称完成前必须跑验证拿证据（测试通过截图/日志），不是"我觉得改好了"。
 6. **禁止自动部署/push/merge** — 等用户指令。
+
+### 子 Agent 触发（铁律）
+
+遇到下列情况 → 派 `Task` 子 agent，不自己干：
+- 读 3+ 文件才能得出结论的调查任务
+- 写报告基于代码库（分析/文档/规范对比）
+- 跨目录搜索验证假设
+
+理由：中间读文件会污染主 context，子 agent 独立 context 做完只带结论回来。
+
+详见：FTS5 search `sub-agent` → `wiki/operations/sub-agents.md`
 
 ### 完整工作流（用户明确指定时使用）
 

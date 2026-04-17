@@ -47,3 +47,5 @@ Append-only record of wiki operations.
 [2026-04-17] create: wiki/operations/managing-groups.md — 从 CLAUDE.md 199-354 移出 156 行群组管理章节
 [2026-04-17] create: wiki/operations/task-scripts.md — 从 CLAUDE.md 372-407 移出 36 行 task script 章节
 [2026-04-17] slim: groups/feishu_main/CLAUDE.md — 407→157 行（-61%），移除 Slack/WhatsApp/Discord 格式规则、Managing Groups、Task Scripts 详细章节，改为 wiki 引用
+[2026-04-17] create: wiki/operations/sub-agents.md — 子 agent 触发场景与铁律（Task A A2）
+[2026-04-17] update: soul.md — 加主动 compact 触发器段 + 子 agent 铁律（Task A A1/A2）

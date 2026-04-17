@@ -242,15 +242,66 @@ function buildVolumeMounts(
   return mounts;
 }
 
-async function buildContainerArgs(
+export async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentIdentifier?: string,
+  group?: RegisteredGroup,
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Per-group custom env vars from registered_groups.container_config.extraEnv
+  // Used for things like GH_TOKEN that the agent's bash subprocess needs.
+  // (settings.json env is for Claude Code SDK config — does NOT propagate to bash tool.)
+  const extraEnv = group?.containerConfig?.extraEnv;
+  if (extraEnv) {
+    for (const [k, v] of Object.entries(extraEnv)) {
+      if (typeof v === 'string') args.push('-e', `${k}=${v}`);
+    }
+  }
+
+  // Per-group auto-compact threshold — lower value = compact earlier while
+  // context is healthier (see docs/superpowers/specs/2026-04-17-andy-context-hygiene-task-a-design.md).
+  const autoCompactWindow = group?.containerConfig?.autoCompactWindow;
+  if (typeof autoCompactWindow === 'number' && autoCompactWindow > 0) {
+    args.push('-e', `CLAUDE_CODE_AUTO_COMPACT_WINDOW=${autoCompactWindow}`);
+  }
+
+  // For Feishu groups, refresh the user access token on every spawn so the
+  // feishu-blocks MCP can read docs with the user's permissions (tenant token
+  // only reads docs where the bot is explicitly added as collaborator).
+  if (group?.folder?.startsWith('feishu_')) {
+    try {
+      const refreshScript = path.join(
+        process.cwd(),
+        'scripts',
+        'refresh-feishu-user-token.sh',
+      );
+      if (fs.existsSync(refreshScript)) {
+        const { execSync } = await import('node:child_process');
+        const token = execSync(refreshScript, {
+          encoding: 'utf8',
+          timeout: 10000,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+        if (token) {
+          args.push('-e', `FEISHU_USER_ACCESS_TOKEN=${token}`);
+          logger.debug(
+            { group: group.folder, tokenPrefix: token.slice(0, 15) },
+            '[feishu] injected user access token',
+          );
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        { group: group.folder, err: (err as Error).message },
+        '[feishu] failed to refresh user access token (will fall back to tenant token)',
+      );
+    }
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
@@ -293,6 +344,24 @@ async function buildContainerArgs(
   return args;
 }
 
+/**
+ * Resolve the idle timeout (ms) for a group: per-group override, else global default.
+ * Used by both the host-side stdin-close timer (src/index.ts) and the container
+ * hard-kill grace period (computeHardTimeoutMs below).
+ */
+export function resolveIdleMs(group: RegisteredGroup): number {
+  return group.containerConfig?.idleTimeout ?? IDLE_TIMEOUT;
+}
+
+/**
+ * Hard-kill timeout (ms) for a container run. Floors on `idleMs + 30s` so the
+ * graceful _close sentinel always has time to trigger before the hard kill.
+ */
+export function computeHardTimeoutMs(group: RegisteredGroup): number {
+  const configTimeout = group.containerConfig?.timeout ?? CONTAINER_TIMEOUT;
+  return Math.max(configTimeout, resolveIdleMs(group) + 30_000);
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -315,6 +384,7 @@ export async function runContainerAgent(
     mounts,
     containerName,
     agentIdentifier,
+    group,
   );
 
   logger.debug(
@@ -439,10 +509,12 @@ export async function runContainerAgent(
 
     let timedOut = false;
     let hadStreamingOutput = false;
-    const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
-    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
-    // graceful _close sentinel has time to trigger before the hard kill fires.
-    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
+    // Keep configTimeout for the user-facing error message on line ~580
+    // (`Container timed out after ${configTimeout}ms`). It shows what the user
+    // configured — computeHardTimeoutMs may floor higher due to grace period,
+    // but the error should reflect the user's intent.
+    const configTimeout = group.containerConfig?.timeout ?? CONTAINER_TIMEOUT;
+    const timeoutMs = computeHardTimeoutMs(group);
 
     const killOnTimeout = () => {
       timedOut = true;

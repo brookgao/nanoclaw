@@ -227,3 +227,93 @@ describe('container-runner timeout behavior', () => {
     expect(result.newSessionId).toBe('session-456');
   });
 });
+
+describe('timeout resolution', () => {
+  it('resolveIdleMs returns per-group idleTimeout when set', async () => {
+    const { resolveIdleMs } = await import('./container-runner.js');
+    const group: RegisteredGroup = {
+      name: 't',
+      folder: 't',
+      trigger: '@t',
+      added_at: '',
+      containerConfig: { idleTimeout: 120000 },
+    };
+    expect(resolveIdleMs(group)).toBe(120000);
+  });
+
+  it('resolveIdleMs falls back to global IDLE_TIMEOUT when unset', async () => {
+    const { resolveIdleMs } = await import('./container-runner.js');
+    const group: RegisteredGroup = {
+      name: 't',
+      folder: 't',
+      trigger: '@t',
+      added_at: '',
+    };
+    // IDLE_TIMEOUT mock = 1800000 (see mock at top of file)
+    expect(resolveIdleMs(group)).toBe(1800000);
+  });
+
+  it('computeHardTimeoutMs floors on per-group idleTimeout + 30s grace', async () => {
+    const { computeHardTimeoutMs } = await import('./container-runner.js');
+    const group: RegisteredGroup = {
+      name: 't',
+      folder: 't',
+      trigger: '@t',
+      added_at: '',
+      containerConfig: { timeout: 60000, idleTimeout: 120000 },
+    };
+    // Math.max(60000, 120000 + 30000) = 150000
+    expect(computeHardTimeoutMs(group)).toBe(150000);
+  });
+
+  it('computeHardTimeoutMs uses global fallback when group has no idleTimeout', async () => {
+    const { computeHardTimeoutMs } = await import('./container-runner.js');
+    const group: RegisteredGroup = {
+      name: 't',
+      folder: 't',
+      trigger: '@t',
+      added_at: '',
+    };
+    // configTimeout default = CONTAINER_TIMEOUT (1800000 mock);
+    // IDLE_TIMEOUT (1800000) + 30000 = 1830000; Math.max = 1830000
+    expect(computeHardTimeoutMs(group)).toBe(1830000);
+  });
+});
+
+describe('buildContainerArgs env injection', () => {
+  it('injects CLAUDE_CODE_AUTO_COMPACT_WINDOW when group sets autoCompactWindow', async () => {
+    const { buildContainerArgs } = await import('./container-runner.js');
+    const group: RegisteredGroup = {
+      name: 'test',
+      folder: 'test',
+      trigger: '@test',
+      added_at: '',
+      containerConfig: { autoCompactWindow: 100000 },
+    };
+    const args = await buildContainerArgs(
+      [],
+      'nanoclaw-test-1',
+      undefined,
+      group,
+    );
+    const joined = args.join(' ');
+    expect(joined).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000');
+  });
+
+  it('does not inject CLAUDE_CODE_AUTO_COMPACT_WINDOW when group does not set autoCompactWindow', async () => {
+    const { buildContainerArgs } = await import('./container-runner.js');
+    const group: RegisteredGroup = {
+      name: 'test',
+      folder: 'test',
+      trigger: '@test',
+      added_at: '',
+    };
+    const args = await buildContainerArgs(
+      [],
+      'nanoclaw-test-2',
+      undefined,
+      group,
+    );
+    expect(args.join(' ')).not.toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
+  });
+});

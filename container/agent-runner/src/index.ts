@@ -63,6 +63,23 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const IPC_EVENTS_DIR = '/workspace/ipc/events';
+
+// Write an agent event file atomically (tmp + rename).
+function writeAgentEvent(event: object): void {
+  try {
+    fs.mkdirSync(IPC_EVENTS_DIR, { recursive: true });
+    const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+    const filepath = path.join(IPC_EVENTS_DIR, filename);
+    const tempPath = `${filepath}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(event));
+    fs.renameSync(tempPath, filepath);
+  } catch (err) {
+    log(
+      `Failed to write agent event: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -378,6 +395,9 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
+  runId?: string,
+  seqRef?: { value: number },
+  startedAt?: number,
 ): Promise<{
   newSessionId?: string;
   lastAssistantUuid?: string;
@@ -406,6 +426,24 @@ async function runQuery(
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
   setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+
+  // Helper to emit a typed agent event
+  const emitEvent = (
+    kind: string,
+    payload: Record<string, unknown>,
+  ) => {
+    if (!runId || !seqRef) return;
+    const seq = seqRef.value++;
+    writeAgentEvent({
+      type: 'agent_event',
+      chatJid: containerInput.chatJid,
+      runId,
+      seq,
+      timestamp: Date.now(),
+      kind,
+      payload,
+    });
+  };
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
@@ -506,6 +544,50 @@ async function runQuery(
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
       log(`Session initialized: ${newSessionId}`);
+      emitEvent('start', { prompt: prompt.slice(0, 500) });
+    }
+
+    if (message.type === 'assistant') {
+      const assistantMsg = message as {
+        message?: { content?: Array<{ type: string; id?: string; name?: string; input?: unknown }> };
+      };
+      const content = assistantMsg.message?.content ?? [];
+      for (const block of content) {
+        if (block.type === 'tool_use') {
+          emitEvent('tool_use', {
+            tool: block.name ?? '',
+            args: block.input ?? {},
+            toolUseId: block.id ?? '',
+          });
+        }
+      }
+    }
+
+    if (message.type === 'user') {
+      const userMsg = message as {
+        message?: { content?: Array<{ type: string; tool_use_id?: string; content?: unknown }> };
+      };
+      const content = userMsg.message?.content ?? [];
+      for (const block of content) {
+        if (block.type === 'tool_result') {
+          const rawContent = block.content;
+          let textPreview: string | undefined;
+          if (typeof rawContent === 'string') {
+            textPreview = rawContent.slice(0, 2048);
+          } else if (Array.isArray(rawContent)) {
+            const texts = (rawContent as Array<{ type: string; text?: string }>)
+              .filter((c) => c.type === 'text')
+              .map((c) => c.text ?? '')
+              .join('');
+            textPreview = texts.slice(0, 2048);
+          }
+          emitEvent('tool_result', {
+            toolUseId: block.tool_use_id ?? '',
+            status: 'done',
+            textPreview,
+          });
+        }
+      }
     }
 
     if (
@@ -529,6 +611,10 @@ async function runQuery(
       log(
         `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
       );
+      emitEvent('final', {
+        text: textResult ?? '',
+        elapsedMs: startedAt !== undefined ? Date.now() - startedAt : 0,
+      });
       writeOutput({
         status: 'success',
         result: textResult || null,
@@ -625,7 +711,8 @@ async function main(): Promise<void> {
   // No real secrets exist in the container environment.
   const sdkEnv: Record<string, string | undefined> = {
     ...process.env,
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '165000',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW:
+      process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '120000',
   };
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -682,6 +769,12 @@ async function main(): Promise<void> {
         `Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`,
       );
 
+      // Generate a fresh runId and seq counter for each agent run
+      const { randomUUID } = await import('crypto');
+      const runId = randomUUID();
+      const seqRef = { value: 0 };
+      const startedAt = Date.now();
+
       const queryResult = await runQuery(
         prompt,
         sessionId,
@@ -689,6 +782,9 @@ async function main(): Promise<void> {
         containerInput,
         sdkEnv,
         resumeAt,
+        runId,
+        seqRef,
+        startedAt,
       );
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
