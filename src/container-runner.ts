@@ -358,7 +358,7 @@ export function resolveIdleMs(group: RegisteredGroup): number {
  * graceful _close sentinel always has time to trigger before the hard kill.
  */
 export function computeHardTimeoutMs(group: RegisteredGroup): number {
-  const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
+  const configTimeout = group.containerConfig?.timeout ?? CONTAINER_TIMEOUT;
   return Math.max(configTimeout, resolveIdleMs(group) + 30_000);
 }
 
@@ -513,7 +513,7 @@ export async function runContainerAgent(
     // (`Container timed out after ${configTimeout}ms`). It shows what the user
     // configured — computeHardTimeoutMs may floor higher due to grace period,
     // but the error should reflect the user's intent.
-    const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
+    const configTimeout = group.containerConfig?.timeout ?? CONTAINER_TIMEOUT;
     const timeoutMs = computeHardTimeoutMs(group);
 
     const killOnTimeout = () => {
