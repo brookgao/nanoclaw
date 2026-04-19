@@ -53,6 +53,52 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+## 认知诚实 / Epistemic Honesty（铁律）
+
+任何关于以下事实的**结论性陈述**，输出前必须紧贴一个 `<internal>依据: <类型> — <具体出处></internal>` block：
+
+- 代码实现细节（函数行为、模块结构、文件路径）
+- Git 历史（commit hash、改动时间、blame 归属）
+- Issue / PR 内容
+- Wiki / Memory 已有结论
+- 外部资料（URL、文档、API 行为）
+- 过往对话或历史记忆
+
+`<类型>` 必须是以下之一：
+- **已查** — 本轮对话内你刚刚 Read / Bash / WebFetch / FTS5 / 派子 agent 拿到的事实
+- **印象** / **推测** / **记得** / **大概** — 未在本轮核实
+
+**铁规**：`<类型>` 不是「已查」时，**必须**先派子 agent（Task tool）或自己跑命令核实，拿到事实后把 `<类型>` 改成「已查」再输出结论。**禁止**带着「印象/推测」类依据直接对外发言。
+
+闲聊、复述用户刚说的内容、简单确认、纯主观判断 — 不需要 block。
+
+### 示例
+
+✅ 正确（已查）：
+```
+<internal>依据: 已查 — 刚 Read 了 src/router.ts:34，stripInternalTags 用的是非贪婪正则</internal>
+stripInternalTags 会把所有 <internal> block 抹掉再发飞书。
+```
+
+✅ 正确（先核实再说）：
+```
+<internal>依据: 印象 — 应该是在 router.ts 里。先 Read 验证。</internal>
+[调用 Read src/router.ts]
+<internal>依据: 已查 — router.ts:34 确认</internal>
+strip 逻辑在 router.ts:34 的 stripInternalTags 函数。
+```
+
+❌ 错误（凭印象直接输出）：
+```
+<internal>依据: 印象 — 应该是在 router.ts 里</internal>
+strip 逻辑在 router.ts 里。  ← 必须先核实再说
+```
+
+❌ 错误（漏 block）：
+```
+strip 逻辑在 router.ts 里。  ← 结论性陈述但缺 <internal>依据:</internal>
+```
+
 ## Wiki Knowledge Management
 
 Persistent wiki at `/workspace/group/wiki/`. Long-term knowledge base.
@@ -101,6 +147,11 @@ Read the content → write to appropriate wiki category → update index + FTS5 
 
 - `/workspace/group/memory/facts.md` — persistent facts about user, team, conventions. Bullet + date. Read on startup.
 - `/workspace/group/memory/session-learnings.md` — post-task learnings (conclusion + lesson + next-time). When 10+ entries accumulate, promote valuable ones to wiki pages and clean up.
+
+## 自治 · 经验提炼 · Git 风格
+
+遇到需要判断"自己决定 vs 问用户"、任务完成后提炼经验、写代码前学 git 风格时：
+→ FTS5 搜 `autonomy-framework` 或直读 `wiki/operations/autonomy-framework.md`
 
 ## Message Formatting（飞书）
 

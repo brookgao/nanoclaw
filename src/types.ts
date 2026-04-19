@@ -40,6 +40,8 @@ export interface ContainerConfig {
   // Per-group Claude SDK auto-compact threshold (tokens). When set, overrides
   // the container default (120000). Lower = compact earlier (context healthier).
   autoCompactWindow?: number;
+  // Whether to append a token-usage footer to outbound replies. Default: true.
+  showTokenFooter?: boolean;
 }
 
 export interface RegisteredGroup {

@@ -35,11 +35,20 @@ interface ContainerInput {
   script?: string;
 }
 
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+  numTurns: number;
+}
+
 interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
   newSessionId?: string;
   error?: string;
+  usage?: TokenUsage;
 }
 
 interface SessionEntry {
@@ -615,10 +624,31 @@ async function runQuery(
         text: textResult ?? '',
         elapsedMs: startedAt !== undefined ? Date.now() - startedAt : 0,
       });
+      // Extract token usage from SDKResultMessage so the host can render it
+      // in the outbound message footer (per-group toggle: showTokenFooter).
+      const r = message as {
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_read_input_tokens?: number;
+        };
+        total_cost_usd?: number;
+        num_turns?: number;
+      };
+      const usage: TokenUsage | undefined = r.usage
+        ? {
+            inputTokens: r.usage.input_tokens ?? 0,
+            outputTokens: r.usage.output_tokens ?? 0,
+            cacheReadTokens: r.usage.cache_read_input_tokens ?? 0,
+            costUsd: r.total_cost_usd ?? 0,
+            numTurns: r.num_turns ?? 0,
+          }
+        : undefined;
       writeOutput({
         status: 'success',
         result: textResult || null,
         newSessionId,
+        usage,
       });
     }
   }

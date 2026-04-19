@@ -63,6 +63,7 @@ import {
 } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { appendTokenFooter } from './token-footer.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -291,9 +292,42 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         typeof result.result === 'string'
           ? result.result
           : JSON.stringify(result.result);
+      // Audit Andy's <internal>依据:</internal> ritual compliance (Task A monitoring)
+      const yijuMatch = raw.match(/<internal>[\s\S]*?依据[:：]\s*(\S+)/);
+      const auditEntry = {
+        ts: new Date().toISOString(),
+        chatJid,
+        hasYiju: !!yijuMatch,
+        yijuKind: yijuMatch?.[1] ?? null,
+        rawLen: raw.length,
+        usage: result.usage ?? null,
+      };
+      logger.info(
+        { group: group.name, ...auditEntry },
+        'agent-claim-audit',
+      );
+      try {
+        const auditFile = path.join(
+          resolveGroupFolderPath(group.folder),
+          'memory',
+          'agent-claim-audit.jsonl',
+        );
+        fs.mkdirSync(path.dirname(auditFile), { recursive: true });
+        fs.appendFileSync(auditFile, JSON.stringify(auditEntry) + '\n');
+      } catch (err) {
+        logger.warn({ group: group.name, err }, 'Failed to write audit jsonl');
+      }
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+      // Append token-usage footer when available and not disabled per-group
+      if (
+        text &&
+        result.usage &&
+        group.containerConfig?.showTokenFooter !== false
+      ) {
+        text = appendTokenFooter(text, result.usage);
+      }
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
