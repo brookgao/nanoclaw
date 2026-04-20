@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { getChannelFactory } from './registry.js';
+import { parseInbound } from './feishu.js';
 
 // Stub readEnvFile so tests don't read the real ./.env.
 vi.mock('../env.js', () => ({
@@ -18,7 +19,9 @@ function restoreEnv(orig: NodeJS.ProcessEnv) {
 
 const origEnv = { ...process.env };
 
-function makeOpts(overrides: Partial<{ onMessage: any; onChatMetadata: any }> = {}) {
+function makeOpts(
+  overrides: Partial<{ onMessage: any; onChatMetadata: any }> = {},
+) {
   return {
     onMessage: overrides.onMessage ?? vi.fn(),
     onChatMetadata: overrides.onChatMetadata ?? vi.fn(),
@@ -40,14 +43,18 @@ function makeEvent(
 ): any {
   return {
     schema: '2.0',
-    header: { event_type: 'im.message.receive_v1', create_time: '1700000000000' },
+    header: {
+      event_type: 'im.message.receive_v1',
+      create_time: '1700000000000',
+    },
     event: {
       sender: {
         sender_id: { open_id: overrides.sender_id ?? 'ou_user1' },
         sender_type: overrides.sender_type ?? 'user',
       },
       message: {
-        message_id: overrides.message_id ?? `om_${Math.random().toString(36).slice(2)}`,
+        message_id:
+          overrides.message_id ?? `om_${Math.random().toString(36).slice(2)}`,
         chat_id: overrides.chat_id ?? 'oc_p2p1',
         chat_type: overrides.chat_type ?? 'p2p',
         message_type: overrides.msg_type ?? 'text',
@@ -109,7 +116,9 @@ describe('FeishuChannel inbound p2p', () => {
   it('routes p2p text to onMessage with feishu:<chat_id> jid and emits metadata', () => {
     const onMessage = vi.fn();
     const onChatMetadata = vi.fn();
-    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage, onChatMetadata }))! as any;
+    const ch = getChannelFactory('feishu')!(
+      makeOpts({ onMessage, onChatMetadata }),
+    )! as any;
 
     ch.handleEvent(makeEvent({ chat_id: 'oc_p2p1', text: 'hi andy' }));
 
@@ -126,13 +135,8 @@ describe('FeishuChannel inbound p2p', () => {
     expect(metaArgs[4]).toBe(false);
   });
 
-  it('ignores non-text message types', () => {
-    const onMessage = vi.fn();
-    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
-    ch.handleEvent(makeEvent({ msg_type: 'image' }));
-    expect(onMessage).not.toHaveBeenCalled();
-  });
 });
+
 
 describe('FeishuChannel inbound group', () => {
   beforeEach(() => {
@@ -215,21 +219,26 @@ describe('FeishuChannel sendMessage', () => {
   });
   afterEach(() => restoreEnv(origEnv));
 
-  it('calls im.message.create with chat_id and text payload', async () => {
+  it('calls im.message.create with an interactive markdown card', async () => {
     const ch = getChannelFactory('feishu')!(makeOpts())! as any;
     const createSpy = vi
       .fn()
       .mockResolvedValue({ code: 0, data: { message_id: 'om_x' } });
     ch.client = { im: { message: { create: createSpy } } };
 
-    await ch.sendMessage('feishu:oc_g1', 'hello world');
+    await ch.sendMessage('feishu:oc_g1', '# Title\n\n```py\nprint(1)\n```');
 
     expect(createSpy).toHaveBeenCalledTimes(1);
     const call = createSpy.mock.calls[0][0];
     expect(call.params.receive_id_type).toBe('chat_id');
     expect(call.data.receive_id).toBe('oc_g1');
-    expect(call.data.msg_type).toBe('text');
-    expect(JSON.parse(call.data.content).text).toBe('hello world');
+    expect(call.data.msg_type).toBe('interactive');
+    const card = JSON.parse(call.data.content);
+    expect(card.schema).toBe('2.0');
+    expect(card.body.elements[0].tag).toBe('markdown');
+    expect(card.body.elements[0].content).toBe(
+      '# Title\n\n```py\nprint(1)\n```',
+    );
   });
 
   it('throws informative error for non-feishu jid', async () => {
@@ -240,7 +249,11 @@ describe('FeishuChannel sendMessage', () => {
   it('logs and swallows API errors without throwing', async () => {
     const ch = getChannelFactory('feishu')!(makeOpts())! as any;
     ch.client = {
-      im: { message: { create: vi.fn().mockRejectedValue(new Error('429 rate limit')) } },
+      im: {
+        message: {
+          create: vi.fn().mockRejectedValue(new Error('429 rate limit')),
+        },
+      },
     };
     await expect(ch.sendMessage('feishu:oc_g1', 'hi')).resolves.toBeUndefined();
   });
@@ -280,5 +293,160 @@ describe('FeishuChannel connect', () => {
     await expect(ch.connect()).resolves.toBeUndefined();
     expect(ch.botOpenId).toBeNull();
     expect(ch.isConnected()).toBe(true);
+  });
+});
+
+describe('parseInbound', () => {
+  const botOpenId = 'ou_bot';
+
+  it('text message → text only, no images', () => {
+    const r = parseInbound(
+      {
+        message_type: 'text',
+        content: JSON.stringify({ text: 'hello' }),
+        mentions: [],
+      } as any,
+      botOpenId,
+    );
+    expect(r).toEqual({ text: 'hello', imageKeys: [], botMentioned: false });
+  });
+
+  it('image message → single image key, empty text', () => {
+    const r = parseInbound(
+      {
+        message_type: 'image',
+        content: JSON.stringify({ image_key: 'img_v3_abc' }),
+        mentions: [],
+      } as any,
+      botOpenId,
+    );
+    expect(r).toEqual({ text: '', imageKeys: ['img_v3_abc'], botMentioned: false });
+  });
+
+  it('post: text + img + at(bot) → text preserved, bot at omitted, image collected, botMentioned=true', () => {
+    const content = JSON.stringify({
+      title: '',
+      content: [[
+        { tag: 'text', text: 'look at this ' },
+        { tag: 'at', user_id: botOpenId },
+        { tag: 'img', image_key: 'img_k1' },
+      ]],
+    });
+    const r = parseInbound(
+      {
+        message_type: 'post',
+        content,
+        mentions: [{ key: '@_user_1', id: { open_id: botOpenId }, name: 'Andy' }],
+      } as any,
+      botOpenId,
+    );
+    expect(r!.text).toBe('look at this');
+    expect(r!.imageKeys).toEqual(['img_k1']);
+    expect(r!.botMentioned).toBe(true);
+  });
+
+  it('post: at non-bot user → substituted with @name from mentions[]', () => {
+    const content = JSON.stringify({
+      title: '',
+      content: [[
+        { tag: 'text', text: 'hey ' },
+        { tag: 'at', user_id: 'ou_other' },
+        { tag: 'text', text: ' look' },
+      ]],
+    });
+    const r = parseInbound(
+      {
+        message_type: 'post',
+        content,
+        mentions: [{ key: '@_user_2', id: { open_id: 'ou_other' }, name: '小明' }],
+      } as any,
+      botOpenId,
+    );
+    expect(r!.text).toBe('hey @小明 look');
+  });
+
+  it('post: at with no matching mentions[] → fallback to user_id', () => {
+    const content = JSON.stringify({
+      title: '',
+      content: [[{ tag: 'at', user_id: 'ou_unknown' }]],
+    });
+    const r = parseInbound(
+      { message_type: 'post', content, mentions: [] } as any,
+      botOpenId,
+    );
+    expect(r!.text).toBe('@ou_unknown');
+  });
+
+  it('post: >5 images → truncated to 5 + truncation marker appended', () => {
+    const segs = Array.from({ length: 7 }, (_, i) => ({ tag: 'img', image_key: `k${i}` }));
+    const content = JSON.stringify({ title: '', content: [segs] });
+    const r = parseInbound(
+      { message_type: 'post', content, mentions: [] } as any,
+      botOpenId,
+    );
+    expect(r!.imageKeys).toHaveLength(5);
+    expect(r!.imageKeys).toEqual(['k0', 'k1', 'k2', 'k3', 'k4']);
+    expect(r!.text).toContain('[系统: 本条消息含 7 张图，仅处理前 5 张]');
+  });
+
+  it('post: multiple paragraphs joined with newlines', () => {
+    const content = JSON.stringify({
+      title: '',
+      content: [
+        [{ tag: 'text', text: 'line 1' }],
+        [{ tag: 'text', text: 'line 2' }],
+      ],
+    });
+    const r = parseInbound(
+      { message_type: 'post', content, mentions: [] } as any,
+      botOpenId,
+    );
+    expect(r!.text).toBe('line 1\nline 2');
+  });
+
+  it('post: unknown tag → silently skipped', () => {
+    const content = JSON.stringify({
+      title: '',
+      content: [[
+        { tag: 'text', text: 'before ' },
+        { tag: 'emoji', emoji_type: 'SMILE' },
+        { tag: 'text', text: 'after' },
+      ]],
+    });
+    const r = parseInbound(
+      { message_type: 'post', content, mentions: [] } as any,
+      botOpenId,
+    );
+    expect(r!.text).toBe('before after');
+  });
+
+  it('malformed post content JSON → returns null', () => {
+    const r = parseInbound(
+      { message_type: 'post', content: '{not json', mentions: [] } as any,
+      botOpenId,
+    );
+    expect(r).toBeNull();
+  });
+
+  it('other types (audio/video/file/sticker) → returns null', () => {
+    for (const t of ['audio', 'video', 'file', 'sticker']) {
+      const r = parseInbound(
+        { message_type: t, content: '{}', mentions: [] } as any,
+        botOpenId,
+      );
+      expect(r).toBeNull();
+    }
+  });
+
+  it('post: empty text + zero images → returns null', () => {
+    const r = parseInbound(
+      {
+        message_type: 'post',
+        content: JSON.stringify({ title: '', content: [[]] }),
+        mentions: [],
+      } as any,
+      botOpenId,
+    );
+    expect(r).toBeNull();
   });
 });

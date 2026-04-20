@@ -1,12 +1,326 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import { registerChannel, ChannelOpts } from './registry.js';
-import { Channel, NewMessage } from '../types.js';
+import { AgentEvent, Channel, NewMessage } from '../types.js';
 import { logger } from '../logger.js';
 import { readEnvFile } from '../env.js';
+import { stripInternalTags } from '../router.js';
+import { TokenUsage, formatTokenFooter } from '../token-footer.js';
 
 const JID_PREFIX = 'feishu:';
 
+// --- Interactive card streaming ---
+
+interface ToolEvent {
+  tool: string;
+  args: Record<string, any>;
+  toolUseId: string;
+  status: 'running' | 'done' | 'error';
+  resultPreview?: string; // truncated output from tool_result event
+}
+
+interface CardSession {
+  runId: string;
+  messageId: string;
+  startedAt: number;
+  prompt: string;
+  toolEvents: ToolEvent[];
+  finalText?: string;
+  tokenFooter?: string;
+  debounceTimer?: ReturnType<typeof setTimeout>;
+  heartbeatTimer?: ReturnType<typeof setInterval>;
+  pendingPatch: boolean;
+}
+
+// Format a tool entry line for the card
+function formatToolEntry(ev: ToolEvent): string {
+  const icon =
+    ev.status === 'running' ? '⏳' : ev.status === 'done' ? '✓' : '✗';
+  let detail = '';
+  if (ev.args) {
+    // Show key arg per tool type
+    const cmd = ev.args.command ?? ev.args.cmd;
+    const file =
+      ev.args.file_path ?? ev.args.path ?? ev.args.pattern ?? ev.args.query;
+    if (cmd) detail = String(cmd).slice(0, 80);
+    else if (file) detail = String(file).slice(0, 80);
+  }
+  const name = ev.tool || 'unknown';
+  return detail ? `${icon} ${name} \`${detail}\`` : `${icon} ${name}`;
+}
+
+// Extract user's actual message from the formatted prompt (strip XML wrapper)
+function extractUserMessage(prompt: string): string {
+  // Prompt format: <context.../>\n<messages>\n<message sender="..." time="...">TEXT</message>\n</messages>
+  // Extract content from the last <message>...</message> tag, or last </m ...>...</m> tag
+  const msgMatch = prompt.match(
+    /<(?:message|m)[^>]*>([^<]+)<\/(?:message|m)>/g,
+  );
+  if (msgMatch) {
+    // Get last message's content
+    const last = msgMatch[msgMatch.length - 1];
+    const content = last.replace(/<[^>]+>/g, '').trim();
+    if (content) return content.slice(0, 200);
+  }
+  // Fallback: strip all XML tags
+  const stripped = prompt
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped.slice(0, 200);
+}
+
+// Last N tools get full collapsible panels (call + result). Older are compact summary.
+const MAX_PANEL_TOOLS = 15;
+const MAX_ARG_CHARS = 300;
+const MAX_RESULT_CHARS = 600;
+
+// Build a single collapsible_panel element for one tool event
+function buildToolPanel(ev: ToolEvent): object {
+  const icon =
+    ev.status === 'running' ? '⏳' : ev.status === 'done' ? '✓' : '✗';
+  const name = ev.tool || 'unknown';
+
+  // Header summary (what shows when collapsed)
+  let headerDetail = '';
+  const cmd = ev.args?.command ?? ev.args?.cmd;
+  const file =
+    ev.args?.file_path ?? ev.args?.path ?? ev.args?.pattern ?? ev.args?.query;
+  if (cmd) headerDetail = String(cmd).slice(0, 80);
+  else if (file) headerDetail = String(file).slice(0, 80);
+  const headerText = headerDetail
+    ? `${icon} ${name} \`${headerDetail}\``
+    : `${icon} ${name}`;
+
+  // Body (shows when expanded)
+  const bodyElements: object[] = [];
+  const argsStr = JSON.stringify(ev.args ?? {}, null, 2);
+  const argsTrunc =
+    argsStr.length > MAX_ARG_CHARS
+      ? argsStr.slice(0, MAX_ARG_CHARS) + '\n...(truncated)'
+      : argsStr;
+  bodyElements.push({
+    tag: 'markdown',
+    content: '**参数**\n```json\n' + argsTrunc + '\n```',
+  });
+
+  if (ev.resultPreview) {
+    const resultTrunc =
+      ev.resultPreview.length > MAX_RESULT_CHARS
+        ? ev.resultPreview.slice(0, MAX_RESULT_CHARS) + '\n...(truncated)'
+        : ev.resultPreview;
+    // Escape backtick sequences that would break the code fence
+    const safeResult = resultTrunc.replace(/`{3,}/g, (m) =>
+      '`'.repeat(m.length).replace(/`/g, '\\`'),
+    );
+    bodyElements.push({
+      tag: 'markdown',
+      content: '**结果**\n```\n' + safeResult + '\n```',
+    });
+  } else if (ev.status === 'running') {
+    bodyElements.push({ tag: 'markdown', content: '_运行中，暂无结果_' });
+  }
+
+  return {
+    tag: 'collapsible_panel',
+    expanded: false,
+    header: {
+      title: { tag: 'markdown', content: headerText },
+      vertical_align: 'center',
+      icon: {
+        tag: 'standard_icon',
+        token: 'down-small-ccm_outlined',
+        size: '12px 12px',
+      },
+    },
+    elements: bodyElements,
+  };
+}
+
+// Build Feishu interactive card v2 JSON from session state
+function buildCard(session: CardSession): object {
+  const isFinal = session.finalText !== undefined;
+  const elapsedMs = Date.now() - session.startedAt;
+  const elapsed =
+    elapsedMs >= 60000
+      ? `${(elapsedMs / 60000).toFixed(1)}min`
+      : `${(elapsedMs / 1000).toFixed(1)}s`;
+  const subtitle = isFinal ? `已完成 (${elapsed})` : `运行中… (${elapsed})`;
+  const template = isFinal ? 'green' : 'blue';
+  const promptPreview = extractUserMessage(session.prompt);
+
+  const elements: object[] = [
+    { tag: 'markdown', content: `**任务**\n> ${promptPreview}` },
+    { tag: 'hr' },
+  ];
+
+  const tools = session.toolEvents;
+  if (tools.length === 0) {
+    elements.push({ tag: 'markdown', content: '**工具调用**\n_（暂无）_' });
+  } else {
+    // Older tools compressed into one summary line, last N as expandable panels
+    const older =
+      tools.length > MAX_PANEL_TOOLS
+        ? tools.slice(0, tools.length - MAX_PANEL_TOOLS)
+        : [];
+    const recent = tools.slice(-MAX_PANEL_TOOLS);
+
+    elements.push({
+      tag: 'markdown',
+      content: `**工具调用** (共 ${tools.length} 个)`,
+    });
+
+    if (older.length > 0) {
+      const groups = new Map<string, number>();
+      for (const e of older) {
+        const n = e.tool || 'unknown';
+        groups.set(n, (groups.get(n) || 0) + 1);
+      }
+      const summary = Array.from(groups.entries())
+        .map(([n, c]) => (c > 1 ? `${n} ×${c}` : n))
+        .join(', ');
+      elements.push({
+        tag: 'markdown',
+        content: `_...前 ${older.length} 个已折叠: ✓ ${summary}_`,
+      });
+    }
+
+    for (const ev of recent) {
+      elements.push(buildToolPanel(ev));
+    }
+  }
+
+  if (isFinal && session.finalText) {
+    elements.push({ tag: 'hr' });
+    const MAX_BODY = 9000;
+    const truncated = session.finalText.length > MAX_BODY;
+    const body =
+      session.finalText.slice(0, MAX_BODY) +
+      (truncated ? '\n\n_[内容过长，已截断]_' : '');
+    const content = session.tokenFooter
+      ? `${body}\n\n${session.tokenFooter}`
+      : body;
+    elements.push({ tag: 'markdown', content });
+  }
+
+  return {
+    schema: '2.0',
+    header: {
+      title: { tag: 'plain_text', content: '阿飞' },
+      subtitle: { tag: 'plain_text', content: subtitle },
+      template,
+    },
+    body: { elements },
+  };
+}
+
 type Domain = 'feishu' | 'lark';
+
+// Wrap markdown text in a minimal interactive card so Feishu renders
+// headings, fenced code blocks, horizontal rules and lists natively.
+export function buildMarkdownCard(md: string): object {
+  return {
+    schema: '2.0',
+    body: { elements: [{ tag: 'markdown', content: md }] },
+  };
+}
+
+type PostSegment =
+  | { tag: 'text'; text: string }
+  | { tag: 'at'; user_id: string }
+  | { tag: 'img'; image_key: string }
+  | { tag: string; [k: string]: unknown };
+
+type PostContent = { title?: string; content: PostSegment[][] };
+
+type FeishuMention = {
+  key?: string;
+  id?: { open_id?: string };
+  name?: string;
+};
+
+export type ParsedInbound = {
+  text: string;
+  imageKeys: string[];
+  botMentioned: boolean;
+};
+
+const MAX_IMAGES_PER_MESSAGE = 5;
+
+export function parseInbound(
+  m: {
+    message_type: string;
+    content: string;
+    mentions?: FeishuMention[];
+  },
+  botOpenId: string | null,
+): ParsedInbound | null {
+  const mentions = m.mentions ?? [];
+  const botMentioned =
+    !!botOpenId && mentions.some((x) => x.id?.open_id === botOpenId);
+
+  if (m.message_type === 'text') {
+    try {
+      const text = JSON.parse(m.content)?.text ?? '';
+      return { text, imageKeys: [], botMentioned };
+    } catch {
+      return null;
+    }
+  }
+
+  if (m.message_type === 'image') {
+    try {
+      const key = JSON.parse(m.content)?.image_key ?? '';
+      if (!key) return null;
+      return { text: '', imageKeys: [key], botMentioned };
+    } catch {
+      return null;
+    }
+  }
+
+  if (m.message_type !== 'post') return null;
+
+  let parsed: PostContent;
+  try {
+    parsed = JSON.parse(m.content);
+  } catch {
+    return null;
+  }
+
+  const paragraphs = parsed.content ?? [];
+  const textLines: string[] = [];
+  const imageKeys: string[] = [];
+
+  for (const segs of paragraphs) {
+    const parts: string[] = [];
+    for (const seg of segs) {
+      if (seg.tag === 'text' && typeof (seg as any).text === 'string') {
+        parts.push((seg as any).text);
+      } else if (seg.tag === 'at' && typeof (seg as any).user_id === 'string') {
+        const uid = (seg as any).user_id as string;
+        if (uid === botOpenId) continue;
+        const mention = mentions.find((x) => x.id?.open_id === uid);
+        const name = mention?.name ?? uid;
+        parts.push(`@${name}`);
+      } else if (seg.tag === 'img' && typeof (seg as any).image_key === 'string') {
+        imageKeys.push((seg as any).image_key);
+      }
+      // unknown tags: silently ignored
+    }
+    const line = parts.join('').trim();
+    if (line) textLines.push(line);
+  }
+
+  const originalImageCount = imageKeys.length;
+  const truncatedKeys = imageKeys.slice(0, MAX_IMAGES_PER_MESSAGE);
+  let text = textLines.join('\n');
+  if (originalImageCount > MAX_IMAGES_PER_MESSAGE) {
+    text = `${text}\n[系统: 本条消息含 ${originalImageCount} 张图，仅处理前 ${MAX_IMAGES_PER_MESSAGE} 张]`.trim();
+  }
+
+  if (!text && truncatedKeys.length === 0) return null;
+
+  return { text, imageKeys: truncatedKeys, botMentioned };
+}
 
 export class FeishuChannel implements Channel {
   public readonly name = 'feishu';
@@ -20,6 +334,10 @@ export class FeishuChannel implements Channel {
   private seenOrder: string[] = [];
   private readonly DEDUP_CAP = 500;
 
+  // Interactive card sessions: one card per active agent run per chat
+  private cardSessions = new Map<string, CardSession>();
+  private readonly CARD_DEBOUNCE_MS = 500;
+
   constructor(
     private appId: string,
     private appSecret: string,
@@ -27,8 +345,15 @@ export class FeishuChannel implements Channel {
     private domain: Domain = 'feishu',
   ) {
     const baseDomain =
-      domain === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn';
-    this.client = new lark.Client({ appId, appSecret, domain: baseDomain, disableTokenCache: false });
+      domain === 'lark'
+        ? 'https://open.larksuite.com'
+        : 'https://open.feishu.cn';
+    this.client = new lark.Client({
+      appId,
+      appSecret,
+      domain: baseDomain,
+      disableTokenCache: false,
+    });
     this.ws = new lark.WSClient({ appId, appSecret, domain: baseDomain });
   }
 
@@ -69,7 +394,10 @@ export class FeishuChannel implements Channel {
 
     // 3) Only text.
     if (m.message_type !== 'text') {
-      logger.debug({ message_type: m.message_type }, '[feishu] ignore non-text');
+      logger.debug(
+        { message_type: m.message_type },
+        '[feishu] ignore non-text',
+      );
       return;
     }
 
@@ -83,10 +411,19 @@ export class FeishuChannel implements Channel {
 
     const chatId: string = m.chat_id;
     const chatType: string = m.chat_type;
-    const mentions: Array<{ key?: string; id?: { open_id?: string } }> = m.mentions ?? [];
+    const mentions: Array<{ key?: string; id?: { open_id?: string } }> =
+      m.mentions ?? [];
 
     if (chatType === 'p2p') {
-      this.deliver(chatId, m.message_id, senderOpenId, text, payload.header?.create_time, false);
+      this.reactAck(m.message_id);
+      this.deliver(
+        chatId,
+        m.message_id,
+        senderOpenId,
+        text,
+        payload.header?.create_time,
+        false,
+      );
       return;
     }
 
@@ -96,15 +433,31 @@ export class FeishuChannel implements Channel {
         return;
       }
       const botMention = mentions.find((x) => x.id?.open_id === this.botOpenId);
-      if (!botMention) {
+
+      // Check if this group has requiresTrigger=false (all messages processed)
+      const jid = `${JID_PREFIX}${chatId}`;
+      const groups = this.opts.registeredGroups();
+      const group = groups[jid];
+      const skipMentionCheck =
+        group?.requiresTrigger === false || group?.isMain;
+
+      if (!botMention && !skipMentionCheck) {
         logger.debug({ chatId }, '[feishu] group msg without @bot, ignored');
         return;
       }
       let cleaned = text;
-      if (botMention.key) {
+      if (botMention?.key) {
         cleaned = cleaned.split(botMention.key).join('').trim();
       }
-      this.deliver(chatId, m.message_id, senderOpenId, cleaned, payload.header?.create_time, true);
+      this.reactAck(m.message_id);
+      this.deliver(
+        chatId,
+        m.message_id,
+        senderOpenId,
+        cleaned,
+        payload.header?.create_time,
+        true,
+      );
       return;
     }
   }
@@ -133,6 +486,21 @@ export class FeishuChannel implements Channel {
     this.opts.onMessage(jid, msg);
   }
 
+  private reactAck(messageId: string): void {
+    // Fire-and-forget: acknowledge receipt with an emoji reaction. Best-effort.
+    this.client.im.messageReaction
+      .create({
+        path: { message_id: messageId },
+        data: { reaction_type: { emoji_type: 'OK' } },
+      })
+      .catch((err: Error) => {
+        logger.debug(
+          { err: err.message, messageId },
+          '[feishu] ack reaction failed',
+        );
+      });
+  }
+
   async connect(): Promise<void> {
     // Resolve bot open_id via REST (SDK has no typed `bot.info.get` in v1.60).
     try {
@@ -140,8 +508,7 @@ export class FeishuChannel implements Channel {
         method: 'GET',
         url: '/open-apis/bot/v3/info',
       });
-      this.botOpenId =
-        res?.data?.bot?.open_id ?? res?.bot?.open_id ?? null;
+      this.botOpenId = res?.data?.bot?.open_id ?? res?.bot?.open_id ?? null;
       logger.info({ botOpenId: this.botOpenId }, '[feishu] bot info resolved');
     } catch (err) {
       this.botOpenId = null;
@@ -154,7 +521,11 @@ export class FeishuChannel implements Channel {
     const dispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data: any) => {
         logger.info(
-          { chat_id: data?.message?.chat_id, chat_type: data?.message?.chat_type, msg_type: data?.message?.message_type },
+          {
+            chat_id: data?.message?.chat_id,
+            chat_type: data?.message?.chat_type,
+            msg_type: data?.message?.message_type,
+          },
           '[feishu] RAW im.message.receive_v1',
         );
         this.handleEvent({
@@ -174,14 +545,25 @@ export class FeishuChannel implements Channel {
     if (!this.ownsJid(jid)) {
       throw new Error(`FeishuChannel cannot send to non-feishu jid: ${jid}`);
     }
+    // If a card session is active for this jid, suppress the plain-text message —
+    // the card's final event already handles the text. This prevents duplicate output.
+    const activeCard = this.cardSessions.get(jid);
+    if (activeCard?.messageId) {
+      logger.debug(
+        { jid },
+        '[feishu] suppressed plain-text (card session active)',
+      );
+      return;
+    }
     const chatId = jid.slice(JID_PREFIX.length);
+    const card = buildMarkdownCard(text);
     try {
       await this.client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
-          msg_type: 'text',
-          content: JSON.stringify({ text }),
+          msg_type: 'interactive',
+          content: JSON.stringify(card),
         },
       });
     } catch (err) {
@@ -190,6 +572,171 @@ export class FeishuChannel implements Channel {
         '[feishu] send failed',
       );
       // Swallow: orchestrator stays alive.
+    }
+  }
+
+  private async schedulePatch(jid: string, immediate = false): Promise<void> {
+    const session = this.cardSessions.get(jid);
+    if (!session) return;
+
+    // Clear existing timer
+    if (session.debounceTimer) {
+      clearTimeout(session.debounceTimer);
+      session.debounceTimer = undefined;
+    }
+
+    const doPatch = async () => {
+      const s = this.cardSessions.get(jid);
+      if (!s) return;
+      s.pendingPatch = false;
+      const card = buildCard(s);
+      try {
+        await this.client.im.message.patch({
+          path: { message_id: s.messageId },
+          data: { content: JSON.stringify(card) },
+        });
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message, jid },
+          '[feishu] card patch failed',
+        );
+      }
+    };
+
+    if (immediate) {
+      session.pendingPatch = true;
+      await doPatch();
+    } else {
+      if (session.pendingPatch) return; // already scheduled
+      session.pendingPatch = true;
+      session.debounceTimer = setTimeout(() => {
+        doPatch().catch((err) =>
+          logger.warn({ err }, '[feishu] debounced patch error'),
+        );
+      }, this.CARD_DEBOUNCE_MS);
+    }
+  }
+
+  async onAgentEvent(jid: string, event: AgentEvent): Promise<void> {
+    if (!this.ownsJid(jid)) return;
+    const chatId = jid.slice(JID_PREFIX.length);
+
+    if (event.kind === 'start') {
+      // Cancel any existing session, but don't create the Feishu card yet —
+      // only create when we see the first tool_use. Zero-tool answers (e.g. 2+2=4)
+      // fall through to plain sendMessage() below, avoiding a useless card shell.
+      const existing = this.cardSessions.get(jid);
+      if (existing?.debounceTimer) clearTimeout(existing.debounceTimer);
+      if (existing?.heartbeatTimer) clearInterval(existing.heartbeatTimer);
+
+      this.cardSessions.set(jid, {
+        runId: event.runId,
+        messageId: '', // empty until first tool_use lazy-creates it
+        startedAt: event.timestamp,
+        prompt: String(event.payload.prompt ?? ''),
+        toolEvents: [],
+        pendingPatch: false,
+      });
+      return;
+    }
+
+    const session = this.cardSessions.get(jid);
+    if (!session || session.runId !== event.runId) return;
+
+    if (event.kind === 'tool_use') {
+      session.toolEvents.push({
+        tool: String(event.payload.tool ?? ''),
+        args: (event.payload.args as Record<string, any>) ?? {},
+        toolUseId: String(event.payload.toolUseId ?? ''),
+        status: 'running',
+      });
+      // Lazy-create the card on first tool_use. Subsequent tool_uses patch.
+      if (!session.messageId) {
+        await this.createCard(jid, chatId, session);
+      } else {
+        await this.schedulePatch(jid);
+      }
+    } else if (event.kind === 'tool_result') {
+      const toolUseId = String(event.payload.toolUseId ?? '');
+      const status =
+        event.payload.status === 'error' ? 'error' : ('done' as const);
+      const preview = event.payload.textPreview
+        ? String(event.payload.textPreview)
+        : undefined;
+      const entry = session.toolEvents.find((e) => e.toolUseId === toolUseId);
+      if (entry) {
+        entry.status = status;
+        entry.resultPreview = preview;
+      }
+      if (session.messageId) await this.schedulePatch(jid);
+    } else if (event.kind === 'final') {
+      const text = stripInternalTags(String(event.payload.text ?? ''));
+      const usage = event.payload.usage as TokenUsage | undefined;
+
+      if (!session.messageId) {
+        // Zero-tool run — don't send here; the existing stdout callback in
+        // index.ts already sends the final text as a plain message.
+        // Sending here too would cause duplicate messages.
+        if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
+        this.cardSessions.delete(jid);
+        logger.info(
+          { jid },
+          '[feishu] zero-tool run, deferring to stdout path',
+        );
+        return;
+      }
+
+      session.finalText = text;
+      session.tokenFooter = usage ? formatTokenFooter(usage) : undefined;
+      for (const e of session.toolEvents) {
+        if (e.status === 'running') e.status = 'done';
+      }
+      await this.schedulePatch(jid, true);
+      if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
+      this.cardSessions.delete(jid);
+      logger.info({ jid }, '[feishu] card session completed');
+    }
+  }
+
+  private async createCard(
+    jid: string,
+    chatId: string,
+    session: CardSession,
+  ): Promise<void> {
+    const card = buildCard(session);
+    try {
+      const res: any = await this.client.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: chatId,
+          msg_type: 'interactive',
+          content: JSON.stringify(card),
+        },
+      });
+      const messageId: string = res?.data?.message_id ?? res?.message_id ?? '';
+      if (!messageId) {
+        logger.warn(
+          { jid, res },
+          '[feishu] card create returned no message_id',
+        );
+        return;
+      }
+      session.messageId = messageId;
+      logger.info({ jid, messageId }, '[feishu] card session started');
+      // Heartbeat: refresh timer in header every 15s so user knows agent is alive
+      // even during long single-tool runs (e.g. pip install, test suite).
+      session.heartbeatTimer = setInterval(() => {
+        const current = this.cardSessions.get(jid);
+        if (!current || current.runId !== session.runId) return;
+        this.schedulePatch(jid).catch((err) =>
+          logger.warn({ err }, '[feishu] heartbeat patch error'),
+        );
+      }, 15000);
+    } catch (err) {
+      logger.error(
+        { err: (err as Error).message, jid },
+        '[feishu] card create failed',
+      );
     }
   }
 
@@ -214,7 +761,11 @@ export class FeishuChannel implements Channel {
 export function createFeishuChannel(opts: ChannelOpts): Channel | null {
   // Project convention: read .env via readEnvFile (secrets not loaded into process.env).
   // Fall back to process.env for tests that set env vars directly.
-  const fileEnv = readEnvFile(['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'FEISHU_DOMAIN']);
+  const fileEnv = readEnvFile([
+    'FEISHU_APP_ID',
+    'FEISHU_APP_SECRET',
+    'FEISHU_DOMAIN',
+  ]);
   const appId = fileEnv.FEISHU_APP_ID || process.env.FEISHU_APP_ID;
   const appSecret = fileEnv.FEISHU_APP_SECRET || process.env.FEISHU_APP_SECRET;
   if (!appId || !appSecret) return null;
