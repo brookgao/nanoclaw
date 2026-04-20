@@ -14,7 +14,8 @@ export type FailReason =
   | 'timeout'
   | 'too_large'
   | 'bad_format'
-  | 'invalid_key';
+  | 'invalid_key'
+  | 'download_failed';
 
 export type Downloader = (key: string) => Promise<Buffer>;
 
@@ -23,12 +24,24 @@ const MAX_LONG_EDGE = 1568;
 const JPEG_QUALITY = 85;
 
 function classifyError(err: unknown): FailReason {
-  const e = err as { code?: string; statusCode?: number; response?: { status?: number } };
+  const e = err as {
+    code?: string;
+    statusCode?: number;
+    response?: { status?: number };
+  };
   const status = e?.statusCode ?? e?.response?.status;
   if (status === 403 || status === 404) return 'expired';
-  if (e?.code === 'ECONNABORTED' || /timeout/i.test(String((err as Error)?.message ?? ''))) return 'timeout';
-  if (e?.code === 'ERR_FR_MAX_CONTENT_LENGTH_EXCEEDED' || /max.*content.*length/i.test(String((err as Error)?.message ?? ''))) return 'too_large';
-  return 'expired';
+  if (
+    e?.code === 'ECONNABORTED' ||
+    /timeout/i.test(String((err as Error)?.message ?? ''))
+  )
+    return 'timeout';
+  if (
+    e?.code === 'ERR_FR_MAX_CONTENT_LENGTH_EXCEEDED' ||
+    /max.*content.*length/i.test(String((err as Error)?.message ?? ''))
+  )
+    return 'too_large';
+  return 'download_failed';
 }
 
 async function processOne(
@@ -46,14 +59,20 @@ async function processOne(
     buf = await downloader(key);
   } catch (err) {
     const reason = classifyError(err);
-    logger.warn({ key, reason, err: (err as Error).message }, '[image] download failed');
+    logger.warn(
+      { key, reason, err: (err as Error).message },
+      '[image] download failed',
+    );
     return { key, reason };
   }
 
   try {
     const out = await sharp(buf)
       .rotate()
-      .resize(MAX_LONG_EDGE, MAX_LONG_EDGE, { fit: 'inside', withoutEnlargement: true })
+      .resize(MAX_LONG_EDGE, MAX_LONG_EDGE, {
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
       .jpeg({ quality: JPEG_QUALITY, mozjpeg: true })
       .toBuffer();
     return {
@@ -62,7 +81,10 @@ async function processOne(
       sourceKey: key,
     };
   } catch (err) {
-    logger.warn({ key, err: (err as Error).message }, '[image] decode/encode failed');
+    logger.warn(
+      { key, err: (err as Error).message },
+      '[image] decode/encode failed',
+    );
     return { key, reason: 'bad_format' };
   }
 }
@@ -71,7 +93,10 @@ export async function processImageKeys(
   imageKeys: string[],
   downloader: Downloader,
   logger: Logger,
-): Promise<{ attachments: ImageAttachment[]; failures: Array<{ key: string; reason: FailReason }> }> {
+): Promise<{
+  attachments: ImageAttachment[];
+  failures: Array<{ key: string; reason: FailReason }>;
+}> {
   if (imageKeys.length === 0) return { attachments: [], failures: [] };
 
   const results = await Promise.all(
