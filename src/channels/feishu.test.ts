@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'fs';
 import { getChannelFactory } from './registry.js';
 import { parseInbound } from './feishu.js';
 
@@ -35,6 +36,7 @@ function makeEvent(
     chat_type: 'p2p' | 'group';
     msg_type: string;
     text: string;
+    content: string;
     sender_id: string;
     sender_type: 'user' | 'app';
     message_id: string;
@@ -58,7 +60,7 @@ function makeEvent(
         chat_id: overrides.chat_id ?? 'oc_p2p1',
         chat_type: overrides.chat_type ?? 'p2p',
         message_type: overrides.msg_type ?? 'text',
-        content: JSON.stringify({ text: overrides.text ?? 'hello' }),
+        content: overrides.content ?? JSON.stringify({ text: overrides.text ?? 'hello' }),
         mentions: overrides.mentions ?? [],
       },
     },
@@ -134,9 +136,7 @@ describe('FeishuChannel inbound p2p', () => {
     expect(metaArgs[3]).toBe('feishu');
     expect(metaArgs[4]).toBe(false);
   });
-
 });
-
 
 describe('FeishuChannel inbound group', () => {
   beforeEach(() => {
@@ -320,23 +320,31 @@ describe('parseInbound', () => {
       } as any,
       botOpenId,
     );
-    expect(r).toEqual({ text: '', imageKeys: ['img_v3_abc'], botMentioned: false });
+    expect(r).toEqual({
+      text: '',
+      imageKeys: ['img_v3_abc'],
+      botMentioned: false,
+    });
   });
 
   it('post: text + img + at(bot) → text preserved, bot at omitted, image collected, botMentioned=true', () => {
     const content = JSON.stringify({
       title: '',
-      content: [[
-        { tag: 'text', text: 'look at this ' },
-        { tag: 'at', user_id: botOpenId },
-        { tag: 'img', image_key: 'img_k1' },
-      ]],
+      content: [
+        [
+          { tag: 'text', text: 'look at this ' },
+          { tag: 'at', user_id: botOpenId },
+          { tag: 'img', image_key: 'img_k1' },
+        ],
+      ],
     });
     const r = parseInbound(
       {
         message_type: 'post',
         content,
-        mentions: [{ key: '@_user_1', id: { open_id: botOpenId }, name: 'Andy' }],
+        mentions: [
+          { key: '@_user_1', id: { open_id: botOpenId }, name: 'Andy' },
+        ],
       } as any,
       botOpenId,
     );
@@ -348,17 +356,21 @@ describe('parseInbound', () => {
   it('post: at non-bot user → substituted with @name from mentions[]', () => {
     const content = JSON.stringify({
       title: '',
-      content: [[
-        { tag: 'text', text: 'hey ' },
-        { tag: 'at', user_id: 'ou_other' },
-        { tag: 'text', text: ' look' },
-      ]],
+      content: [
+        [
+          { tag: 'text', text: 'hey ' },
+          { tag: 'at', user_id: 'ou_other' },
+          { tag: 'text', text: ' look' },
+        ],
+      ],
     });
     const r = parseInbound(
       {
         message_type: 'post',
         content,
-        mentions: [{ key: '@_user_2', id: { open_id: 'ou_other' }, name: '小明' }],
+        mentions: [
+          { key: '@_user_2', id: { open_id: 'ou_other' }, name: '小明' },
+        ],
       } as any,
       botOpenId,
     );
@@ -378,7 +390,10 @@ describe('parseInbound', () => {
   });
 
   it('post: >5 images → truncated to 5 + truncation marker appended', () => {
-    const segs = Array.from({ length: 7 }, (_, i) => ({ tag: 'img', image_key: `k${i}` }));
+    const segs = Array.from({ length: 7 }, (_, i) => ({
+      tag: 'img',
+      image_key: `k${i}`,
+    }));
     const content = JSON.stringify({ title: '', content: [segs] });
     const r = parseInbound(
       { message_type: 'post', content, mentions: [] } as any,
@@ -407,11 +422,13 @@ describe('parseInbound', () => {
   it('post: unknown tag → silently skipped', () => {
     const content = JSON.stringify({
       title: '',
-      content: [[
-        { tag: 'text', text: 'before ' },
-        { tag: 'emoji', emoji_type: 'SMILE' },
-        { tag: 'text', text: 'after' },
-      ]],
+      content: [
+        [
+          { tag: 'text', text: 'before ' },
+          { tag: 'emoji', emoji_type: 'SMILE' },
+          { tag: 'text', text: 'after' },
+        ],
+      ],
     });
     const r = parseInbound(
       { message_type: 'post', content, mentions: [] } as any,
@@ -448,5 +465,117 @@ describe('parseInbound', () => {
       botOpenId,
     );
     expect(r).toBeNull();
+  });
+});
+
+describe('FeishuChannel image pipeline', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  function makeClientMock() {
+    return {
+      im: {
+        messageReaction: {
+          create: vi.fn().mockResolvedValue({}),
+        },
+        message: {
+          create: vi.fn().mockResolvedValue({ data: { message_id: 'om_reply' } }),
+        },
+      },
+    };
+  }
+
+  it('p2p image success → onMessage called with images attached', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+    ch.downloadImage = vi.fn(async () =>
+      readFileSync('/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png'),
+    );
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'image',
+        content: JSON.stringify({ image_key: 'img_good' }),
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.images).toHaveLength(1);
+    expect(msg.images[0].sourceKey).toBe('img_good');
+    expect(msg.images[0].mediaType).toBe('image/jpeg');
+  });
+
+  it('p2p image fail (404) → sendMessage with 🖼️, onMessage NOT called', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+    const sendSpy = vi.spyOn(ch, 'sendMessage').mockResolvedValue(undefined);
+    ch.downloadImage = vi.fn(async () => {
+      throw Object.assign(new Error('404'), { statusCode: 404 });
+    });
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'image',
+        content: JSON.stringify({ image_key: 'img_expired' }),
+      }),
+    );
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(sendSpy).toHaveBeenCalled();
+    const [, text] = sendSpy.mock.calls[0];
+    expect(text).toMatch(/^🖼️ 图没收到\(过期\)/);
+  });
+
+  it('p2p mixed 2/3 fail → failure message shows counts', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+    const sendSpy = vi.spyOn(ch, 'sendMessage').mockResolvedValue(undefined);
+    const good = readFileSync(
+      '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
+    );
+    ch.downloadImage = vi.fn(async (k: string) => {
+      if (k === 'a' || k === 'c') throw Object.assign(new Error('404'), { statusCode: 404 });
+      return good;
+    });
+
+    const content = JSON.stringify({
+      title: '',
+      content: [
+        [
+          { tag: 'img', image_key: 'a' },
+          { tag: 'img', image_key: 'b' },
+          { tag: 'img', image_key: 'c' },
+        ],
+      ],
+    });
+    await ch.handleEvent(makeEvent({ msg_type: 'post', content }));
+
+    expect(onMessage).not.toHaveBeenCalled();
+    const [, text] = sendSpy.mock.calls[0];
+    expect(text).toMatch(/3 张图有 2 张没收到/);
+  });
+
+  it('p2p text message still reaches onMessage (regression)', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'text',
+        content: JSON.stringify({ text: 'hello' }),
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][1].content).toBe('hello');
+    expect(onMessage.mock.calls[0][1].images).toBeUndefined();
   });
 });

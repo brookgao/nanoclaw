@@ -5,6 +5,7 @@ import { logger } from '../logger.js';
 import { readEnvFile } from '../env.js';
 import { stripInternalTags } from '../router.js';
 import { TokenUsage, formatTokenFooter } from '../token-footer.js';
+import { processImageKeys, type FailReason, type ImageAttachment } from '../image.js';
 
 const JID_PREFIX = 'feishu:';
 
@@ -301,7 +302,10 @@ export function parseInbound(
         const mention = mentions.find((x) => x.id?.open_id === uid);
         const name = mention?.name ?? uid;
         parts.push(`@${name}`);
-      } else if (seg.tag === 'img' && typeof (seg as any).image_key === 'string') {
+      } else if (
+        seg.tag === 'img' &&
+        typeof (seg as any).image_key === 'string'
+      ) {
         imageKeys.push((seg as any).image_key);
       }
       // unknown tags: silently ignored
@@ -314,12 +318,35 @@ export function parseInbound(
   const truncatedKeys = imageKeys.slice(0, MAX_IMAGES_PER_MESSAGE);
   let text = textLines.join('\n');
   if (originalImageCount > MAX_IMAGES_PER_MESSAGE) {
-    text = `${text}\n[系统: 本条消息含 ${originalImageCount} 张图，仅处理前 ${MAX_IMAGES_PER_MESSAGE} 张]`.trim();
+    text =
+      `${text}\n[系统: 本条消息含 ${originalImageCount} 张图，仅处理前 ${MAX_IMAGES_PER_MESSAGE} 张]`.trim();
   }
 
   if (!text && truncatedKeys.length === 0) return null;
 
   return { text, imageKeys: truncatedKeys, botMentioned };
+}
+
+function buildFailureMessage(
+  failures: Array<{ key: string; reason: FailReason }>,
+  totalImageCount: number,
+): string {
+  const failCount = failures.length;
+  if (totalImageCount > 1 && failCount < totalImageCount) {
+    return `🖼️ ${totalImageCount} 张图有 ${failCount} 张没收到，能把这些重发下吗？`;
+  }
+  const reason = failures[0]?.reason ?? 'download_failed';
+  if (reason === 'too_large') return `🖼️ 图太大(>10MB)，能压缩后重发吗？`;
+  if (reason === 'bad_format') return `🖼️ 这张图我读不了（可能损坏或格式不支持），能换一张发吗？`;
+  const reasonZh: Record<FailReason, string> = {
+    expired: '过期',
+    timeout: '超时',
+    too_large: '过大',
+    bad_format: '格式',
+    invalid_key: '过期',
+    download_failed: '网络异常',
+  };
+  return `🖼️ 图没收到(${reasonZh[reason]})，能重发吗？`;
 }
 
 export class FeishuChannel implements Channel {
@@ -369,12 +396,12 @@ export class FeishuChannel implements Channel {
   }
 
   // Exposed for tests; also called from WS event handler.
-  handleEvent(payload: any): void {
+  async handleEvent(payload: any): Promise<void> {
     const ev = payload?.event;
     if (!ev?.message) return;
     const m = ev.message;
 
-    // 1) Self-filter: drop non-user senders (app / bot echo).
+    // 1) Self-filter: drop non-user / self
     const senderType: string = ev.sender?.sender_type ?? '';
     const senderOpenId: string = ev.sender?.sender_id?.open_id ?? '';
     if (senderType !== 'user') {
@@ -386,80 +413,96 @@ export class FeishuChannel implements Channel {
       return;
     }
 
-    // 2) Dedup on message_id.
+    // 2) Dedup
     if (!this.remember(m.message_id)) {
       logger.debug({ message_id: m.message_id }, '[feishu] dedup hit');
       return;
     }
 
-    // 3) Only text.
-    if (m.message_type !== 'text') {
-      logger.debug(
-        { message_type: m.message_type },
-        '[feishu] ignore non-text',
-      );
-      return;
-    }
-
-    let text = '';
-    try {
-      text = JSON.parse(m.content)?.text ?? '';
-    } catch {
-      logger.warn({ content: m.content }, '[feishu] malformed content');
+    // 3) Parse
+    const parsed = parseInbound(m, this.botOpenId);
+    if (!parsed) {
+      logger.debug({ message_type: m.message_type }, '[feishu] parseInbound dropped');
       return;
     }
 
     const chatId: string = m.chat_id;
     const chatType: string = m.chat_type;
-    const mentions: Array<{ key?: string; id?: { open_id?: string } }> =
-      m.mentions ?? [];
 
-    if (chatType === 'p2p') {
-      this.reactAck(m.message_id);
-      this.deliver(
-        chatId,
-        m.message_id,
-        senderOpenId,
-        text,
-        payload.header?.create_time,
-        false,
-      );
-      return;
-    }
-
+    // 4) Group chat gate: require @bot mention (preserving requiresTrigger/isMain override)
     if (chatType === 'group') {
       if (!this.botOpenId) {
         logger.debug('[feishu] group msg before botOpenId resolved, ignored');
         return;
       }
-      const botMention = mentions.find((x) => x.id?.open_id === this.botOpenId);
-
-      // Check if this group has requiresTrigger=false (all messages processed)
       const jid = `${JID_PREFIX}${chatId}`;
       const groups = this.opts.registeredGroups();
       const group = groups[jid];
-      const skipMentionCheck =
-        group?.requiresTrigger === false || group?.isMain;
-
-      if (!botMention && !skipMentionCheck) {
+      const skipMentionCheck = group?.requiresTrigger === false || group?.isMain;
+      if (!parsed.botMentioned && !skipMentionCheck) {
         logger.debug({ chatId }, '[feishu] group msg without @bot, ignored');
         return;
       }
-      let cleaned = text;
-      if (botMention?.key) {
-        cleaned = cleaned.split(botMention.key).join('').trim();
-      }
-      this.reactAck(m.message_id);
-      this.deliver(
-        chatId,
-        m.message_id,
-        senderOpenId,
-        cleaned,
-        payload.header?.create_time,
-        true,
-      );
+    } else if (chatType !== 'p2p') {
+      logger.debug({ chatType }, '[feishu] unknown chat type, dropped');
       return;
     }
+
+    // 5) Strip bot-mention display text in group chat
+    let cleanedText = parsed.text;
+    if (chatType !== 'p2p') {
+      const mentions: Array<{ key?: string; id?: { open_id?: string } }> = m.mentions ?? [];
+      const botMention = mentions.find((x) => x.id?.open_id === this.botOpenId);
+      if (botMention?.key) {
+        cleanedText = cleanedText.split(botMention.key).join('').trim();
+      }
+    }
+
+    // 6) Process images if present
+    let attachments: ImageAttachment[] = [];
+    if (parsed.imageKeys.length > 0) {
+      this.reactAck(m.message_id); // 👀 immediately
+      const result = await processImageKeys(
+        parsed.imageKeys,
+        (k) => this.downloadImage(k),
+        logger,
+      );
+      if (result.failures.length > 0) {
+        this.reactFail(m.message_id);
+        const failMsg = buildFailureMessage(result.failures, parsed.imageKeys.length);
+        try {
+          await this.sendMessage(`${JID_PREFIX}${chatId}`, failMsg);
+        } catch (err) {
+          logger.warn({ err: (err as Error).message }, '[feishu] send failure notice errored');
+        }
+        logger.warn({ msg_id: m.message_id, failures: result.failures }, '[feishu] image failure');
+        return;
+      }
+      attachments = result.attachments;
+      logger.info(
+        {
+          msg_id: m.message_id,
+          image_count: attachments.length,
+          total_base64_bytes: attachments.reduce((s, a) => s + a.base64.length, 0),
+          est_input_tokens: attachments.length * 1568,
+          feishu_keys: attachments.map((a) => a.sourceKey),
+        },
+        '[feishu] image attached',
+      );
+    } else {
+      this.reactAck(m.message_id); // 👀 for pure-text path (existing behavior preserved)
+    }
+
+    // 7) Deliver
+    this.deliver(
+      chatId,
+      m.message_id,
+      senderOpenId,
+      cleanedText,
+      payload.header?.create_time,
+      chatType !== 'p2p',
+      attachments,
+    );
   }
 
   private deliver(
@@ -469,6 +512,7 @@ export class FeishuChannel implements Channel {
     content: string,
     createTime: string | undefined,
     isGroup: boolean,
+    images: ImageAttachment[] = [],
   ): void {
     const jid = `${JID_PREFIX}${chatId}`;
     const ts = createTime
@@ -482,6 +526,7 @@ export class FeishuChannel implements Channel {
       sender_name: senderOpenId,
       content,
       timestamp: ts,
+      images: images.length > 0 ? images : undefined,
     };
     this.opts.onMessage(jid, msg);
   }
@@ -499,6 +544,38 @@ export class FeishuChannel implements Channel {
           '[feishu] ack reaction failed',
         );
       });
+  }
+
+  private reactFail(messageId: string): void {
+    // Fire-and-forget: negative reaction to signal download failure. Best-effort.
+    this.client.im.messageReaction
+      .create({
+        path: { message_id: messageId },
+        data: { reaction_type: { emoji_type: 'CRY' } },
+      })
+      .catch((err: Error) => {
+        logger.debug(
+          { err: err.message, messageId },
+          '[feishu] reactFail ignored',
+        );
+      });
+  }
+
+  async downloadImage(imageKey: string): Promise<Buffer> {
+    const res: any = await this.client.request(
+      {
+        method: 'GET',
+        url: `/open-apis/im/v1/images/${imageKey}`,
+        params: { type: 'message' },
+        responseType: 'arraybuffer',
+      },
+      { maxContentLength: 10 * 1024 * 1024, timeout: 8000 },
+    );
+    // client.request may return raw ArrayBuffer/Buffer or { data: ArrayBuffer }
+    if (Buffer.isBuffer(res)) return res;
+    if (res instanceof ArrayBuffer) return Buffer.from(res);
+    if (res?.data) return Buffer.from(res.data);
+    return Buffer.from(res);
   }
 
   async connect(): Promise<void> {
