@@ -5,7 +5,11 @@ import { logger } from '../logger.js';
 import { readEnvFile } from '../env.js';
 import { stripInternalTags } from '../router.js';
 import { TokenUsage, formatTokenFooter } from '../token-footer.js';
-import { processImageKeys, type FailReason, type ImageAttachment } from '../image.js';
+import {
+  processImageKeys,
+  type FailReason,
+  type ImageAttachment,
+} from '../image.js';
 
 const JID_PREFIX = 'feishu:';
 
@@ -337,7 +341,8 @@ function buildFailureMessage(
   }
   const reason = failures[0]?.reason ?? 'download_failed';
   if (reason === 'too_large') return `🖼️ 图太大(>10MB)，能压缩后重发吗？`;
-  if (reason === 'bad_format') return `🖼️ 这张图我读不了（可能损坏或格式不支持），能换一张发吗？`;
+  if (reason === 'bad_format')
+    return `🖼️ 这张图我读不了（可能损坏或格式不支持），能换一张发吗？`;
   const reasonZh: Record<FailReason, string> = {
     expired: '过期',
     timeout: '超时',
@@ -422,7 +427,10 @@ export class FeishuChannel implements Channel {
     // 3) Parse
     const parsed = parseInbound(m, this.botOpenId);
     if (!parsed) {
-      logger.debug({ message_type: m.message_type }, '[feishu] parseInbound dropped');
+      logger.debug(
+        { message_type: m.message_type },
+        '[feishu] parseInbound dropped',
+      );
       return;
     }
 
@@ -438,7 +446,8 @@ export class FeishuChannel implements Channel {
       const jid = `${JID_PREFIX}${chatId}`;
       const groups = this.opts.registeredGroups();
       const group = groups[jid];
-      const skipMentionCheck = group?.requiresTrigger === false || group?.isMain;
+      const skipMentionCheck =
+        group?.requiresTrigger === false || group?.isMain;
       if (!parsed.botMentioned && !skipMentionCheck) {
         logger.debug({ chatId }, '[feishu] group msg without @bot, ignored');
         return;
@@ -451,7 +460,8 @@ export class FeishuChannel implements Channel {
     // 5) Strip bot-mention display text in group chat
     let cleanedText = parsed.text;
     if (chatType !== 'p2p') {
-      const mentions: Array<{ key?: string; id?: { open_id?: string } }> = m.mentions ?? [];
+      const mentions: Array<{ key?: string; id?: { open_id?: string } }> =
+        m.mentions ?? [];
       const botMention = mentions.find((x) => x.id?.open_id === this.botOpenId);
       if (botMention?.key) {
         cleanedText = cleanedText.split(botMention.key).join('').trim();
@@ -469,13 +479,22 @@ export class FeishuChannel implements Channel {
       );
       if (result.failures.length > 0) {
         this.reactFail(m.message_id);
-        const failMsg = buildFailureMessage(result.failures, parsed.imageKeys.length);
+        const failMsg = buildFailureMessage(
+          result.failures,
+          parsed.imageKeys.length,
+        );
         try {
           await this.sendMessage(`${JID_PREFIX}${chatId}`, failMsg);
         } catch (err) {
-          logger.warn({ err: (err as Error).message }, '[feishu] send failure notice errored');
+          logger.warn(
+            { err: (err as Error).message },
+            '[feishu] send failure notice errored',
+          );
         }
-        logger.warn({ msg_id: m.message_id, failures: result.failures }, '[feishu] image failure');
+        logger.warn(
+          { msg_id: m.message_id, failures: result.failures },
+          '[feishu] image failure',
+        );
         return;
       }
       attachments = result.attachments;
@@ -483,7 +502,10 @@ export class FeishuChannel implements Channel {
         {
           msg_id: m.message_id,
           image_count: attachments.length,
-          total_base64_bytes: attachments.reduce((s, a) => s + a.base64.length, 0),
+          total_base64_bytes: attachments.reduce(
+            (s, a) => s + a.base64.length,
+            0,
+          ),
           est_input_tokens: attachments.length * 1568,
           feishu_keys: attachments.map((a) => a.sourceKey),
         },
@@ -608,7 +630,12 @@ export class FeishuChannel implements Channel {
         this.handleEvent({
           event: data,
           header: { create_time: String(Date.now()) },
-        });
+        }).catch((err) =>
+          logger.error(
+            { err: (err as Error).message },
+            '[feishu] handleEvent unhandled error',
+          ),
+        );
       },
     });
 
