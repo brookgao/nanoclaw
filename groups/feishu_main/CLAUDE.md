@@ -111,6 +111,10 @@ sqlite3 /workspace/project/store/messages.db \
 ```
 Search returns relative paths like `wiki/nine/architecture.md`. Read them at `/workspace/group/<path>`. Nothing found → fall back to tmux bridge or code.
 
+**Tokenizer 坑**（`porter unicode61`）：
+- 连字符词要引号：`MATCH '"tmux-bridge"'`（不加引号会报 `no such column: bridge`）
+- 短中文查询（2-3 字）可能静默无结果 — 用完整短语。例：搜 `已授权` → 0 条；搜 `已授权的例行动作` → ✅
+
 ### Write Rules
 After creating or updating any wiki page, always:
 1. Update `/workspace/group/wiki/index.md` (add/modify the entry)

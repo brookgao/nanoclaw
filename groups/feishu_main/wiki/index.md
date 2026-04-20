@@ -7,6 +7,7 @@ Andy's knowledge base. Read this on startup for a global view.
 - [managing-groups](operations/managing-groups.md) — 群组管理：查找/注册/删除/trigger/allowlist/containerConfig
 - [task-scripts](operations/task-scripts.md) — 定时任务 script 阶段：wakeAgent JSON 契约、何时不用 script
 - [sub-agents](operations/sub-agents.md) — 何时派 Task/TeamCreate 子 agent 避免中间输出污染主 context
+- [autonomy-framework](operations/autonomy-framework.md) — 自治决策边界表 + post-task 经验提炼 + git 风格学习 + 已授权例行动作（start-session / seed 同步）
 
 ## NINE Project
 
@@ -15,6 +16,7 @@ Andy's knowledge base. Read this on startup for a global view.
 - [known-issues](nine/known-issues.md) — 反复出现的 bug 模式、性能问题、架构待改造方向
 - [ops-checklist](nine/ops-checklist.md) — 运维前置检查：LLM 配置、健康检查、部署脚本
 - [modules/llm-factory](nine/modules/llm-factory.md) — llm_factory.py 提供商切换、性能基准、google provider 禁区
+- [modules/skill-api](nine/modules/skill-api.md) — 统一 Skill 列表/文件内容 API（Python + Go + 前端 SkillDetail 详情页）
 
 ## Decisions
 
@@ -41,7 +43,7 @@ Andy's knowledge base. Read this on startup for a global view.
 ### 验收 / VM / Sandbox
 - [vm-verify](learnings/nine/vm-verify.md) — VM 验收 0/0、infra_error、健康检查死循环
 - [sso-sandbox-browser](learnings/nine/sso-sandbox-browser.md) — SSO 认证等待、多VM browser隔离、VNC黑屏
-- [e2e-testing](learnings/nine/e2e-testing.md) — E2E 测试基础设施 bug、SSE去重、Puppeteer 规范
+- [e2e-testing](learnings/nine/e2e-testing.md) — E2E 测试基础设施 bug、SSE去重、Puppeteer 规范；V2 产研图全链路 E2E 框架（gate_bypass、onboarding_setup、MainAgent 追问漂移）
 
 ### Git / Deploy / 构建
 - [git-deploy](learnings/nine/git-deploy.md) — commit静默失败、build产物污染、push认证失败
