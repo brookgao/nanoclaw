@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 import { GroupQueue } from './group-queue.js';
+import type { ImageAttachment } from './types.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
@@ -430,6 +431,116 @@ describe('GroupQueue', () => {
     expect(result).toBe(false);
 
     resolveTask!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  // --- sendMessage images field ---
+
+  it('sendMessage writes images field to IPC JSON when provided', async () => {
+    const fs = await import('fs');
+    let resolveProcess: () => void;
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group');
+
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    writeFileSync.mockClear();
+
+    const images: ImageAttachment[] = [
+      { mediaType: 'image/jpeg', base64: 'AAAA', sourceKey: 'k1' },
+    ];
+    const result = queue.sendMessage('group1@g.us', 'hi', images);
+    expect(result).toBe(true);
+
+    const msgWrite = writeFileSync.mock.calls.find(
+      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
+    );
+    expect(msgWrite).toBeDefined();
+    const parsed = JSON.parse(msgWrite![1] as string);
+    expect(parsed.type).toBe('message');
+    expect(parsed.text).toBe('hi');
+    expect(parsed.images).toHaveLength(1);
+    expect(parsed.images[0].sourceKey).toBe('k1');
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('sendMessage omits images field when undefined or empty (backward compat)', async () => {
+    const fs = await import('fs');
+    let resolveProcess: () => void;
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group');
+
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    writeFileSync.mockClear();
+
+    const result = queue.sendMessage('group1@g.us', 'hi');
+    expect(result).toBe(true);
+
+    const msgWrite = writeFileSync.mock.calls.find(
+      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
+    );
+    expect(msgWrite).toBeDefined();
+    const parsed = JSON.parse(msgWrite![1] as string);
+    expect(parsed.type).toBe('message');
+    expect(parsed.text).toBe('hi');
+    expect('images' in parsed).toBe(false);
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('sendMessage returns false and does not write when payload exceeds 8MB', async () => {
+    const fs = await import('fs');
+    let resolveProcess: () => void;
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group');
+
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    writeFileSync.mockClear();
+
+    const oversizedImages: ImageAttachment[] = [
+      { mediaType: 'image/jpeg', base64: 'A'.repeat(9 * 1024 * 1024), sourceKey: 'big' },
+    ];
+    const result = queue.sendMessage('group1@g.us', 'hi', oversizedImages);
+    expect(result).toBe(false);
+
+    const writes = writeFileSync.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
+    );
+    expect(writes).toHaveLength(0);
+
+    resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
 

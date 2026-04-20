@@ -106,6 +106,7 @@ vi.mock('child_process', async () => {
 });
 
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import type { ContainerInput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -315,5 +316,31 @@ describe('buildContainerArgs env injection', () => {
       group,
     );
     expect(args.join(' ')).not.toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
+  });
+});
+
+describe('ContainerInput images field', () => {
+  it('ContainerInput serializes images field through JSON', () => {
+    const input: ContainerInput = {
+      prompt: '<messages/>',
+      groupFolder: 'g1',
+      chatJid: 'c1',
+      isMain: false,
+      images: [{ mediaType: 'image/jpeg', base64: 'AAAA', sourceKey: 'k1' }],
+    };
+    const roundtripped = JSON.parse(JSON.stringify(input));
+    expect(roundtripped.images).toHaveLength(1);
+    expect(roundtripped.images[0].sourceKey).toBe('k1');
+  });
+
+  it('ContainerInput omits images field when undefined', () => {
+    const input: ContainerInput = {
+      prompt: '<messages/>',
+      groupFolder: 'g1',
+      chatJid: 'c1',
+      isMain: false,
+    };
+    const roundtripped = JSON.parse(JSON.stringify(input));
+    expect('images' in roundtripped).toBe(false);
   });
 });

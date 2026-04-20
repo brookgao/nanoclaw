@@ -252,7 +252,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const { xml: prompt, images: _images } = formatMessages(missedMessages, TIMEZONE);
+  const { xml: prompt, images } = formatMessages(
+    missedMessages,
+    TIMEZONE,
+  );
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -373,6 +376,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  images?: import('./types.js').ImageAttachment[],
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
@@ -424,6 +428,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        images,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -544,7 +549,10 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const { xml: formatted, images: _images } = formatMessages(messagesToSend, TIMEZONE);
+          const { xml: formatted, images: _images } = formatMessages(
+            messagesToSend,
+            TIMEZONE,
+          );
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(

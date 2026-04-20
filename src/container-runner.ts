@@ -26,7 +26,7 @@ import {
 } from './container-runtime.js';
 import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import { ImageAttachment, RegisteredGroup } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -43,6 +43,7 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  images?: ImageAttachment[];
 }
 
 export interface TokenUsage {
@@ -185,6 +186,24 @@ function buildVolumeMounts(
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
       fs.cpSync(srcDir, dstDir, { recursive: true });
+    }
+  }
+
+  // Also sync user's custom skills from ~/.claude/skills/ (host machine)
+  const userSkillsSrc = path.join(
+    process.env.HOME ?? '/Users/admin',
+    '.claude',
+    'skills',
+  );
+  if (fs.existsSync(userSkillsSrc)) {
+    for (const skillDir of fs.readdirSync(userSkillsSrc)) {
+      const srcDir = path.join(userSkillsSrc, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      const dstDir = path.join(skillsDst, skillDir);
+      // Don't overwrite container skills (they take precedence)
+      if (!fs.existsSync(dstDir)) {
+        fs.cpSync(srcDir, dstDir, { recursive: true });
+      }
     }
   }
   mounts.push({
