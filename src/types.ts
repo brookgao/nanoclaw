@@ -1,3 +1,6 @@
+import type { ImageAttachment } from './image.js';
+export type { ImageAttachment } from './image.js';
+
 export interface AdditionalMount {
   hostPath: string; // Absolute path on host (supports ~ for home)
   containerPath?: string; // Optional — defaults to basename of hostPath. Mounted at /workspace/extra/{value}
@@ -67,6 +70,7 @@ export interface NewMessage {
   reply_to_message_id?: string;
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
+  images?: ImageAttachment[];
 }
 
 export interface ScheduledTask {
