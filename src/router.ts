@@ -1,4 +1,4 @@
-import { Channel, NewMessage } from './types.js';
+import { Channel, NewMessage, ImageAttachment } from './types.js';
 import { formatLocalTime } from './timezone.js';
 
 export function escapeXml(s: string): string {
@@ -13,7 +13,10 @@ export function escapeXml(s: string): string {
 export function formatMessages(
   messages: NewMessage[],
   timezone: string,
-): string {
+): { xml: string; images: ImageAttachment[] } {
+  const allImages: ImageAttachment[] = [];
+  let imgIdx = 0;
+
   const lines = messages.map((m) => {
     const displayTime = formatLocalTime(m.timestamp, timezone);
     const replyAttr = m.reply_to_message_id
@@ -23,12 +26,24 @@ export function formatMessages(
       m.reply_to_message_content && m.reply_to_sender_name
         ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name)}">${escapeXml(m.reply_to_message_content)}</quoted_message>`
         : '';
-    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>${replySnippet}${escapeXml(m.content)}</message>`;
+
+    const markers: string[] = [];
+    for (const img of m.images ?? []) {
+      imgIdx++;
+      allImages.push(img);
+      markers.push(`[图 ${imgIdx}]`);
+    }
+    const contentWithMarkers =
+      markers.length > 0 ? `${m.content} ${markers.join(' ')}` : m.content;
+
+    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>${replySnippet}${escapeXml(contentWithMarkers)}</message>`;
   });
 
   const header = `<context timezone="${escapeXml(timezone)}" />\n`;
-
-  return `${header}<messages>\n${lines.join('\n')}\n</messages>`;
+  return {
+    xml: `${header}<messages>\n${lines.join('\n')}\n</messages>`,
+    images: allImages,
+  };
 }
 
 export function stripInternalTags(text: string): string {

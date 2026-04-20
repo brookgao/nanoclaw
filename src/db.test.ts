@@ -371,7 +371,7 @@ describe('getMessagesSince', () => {
     const msgs = getMessagesSince('fresh@g.us', '', 'Andy', 10);
     expect(msgs).toHaveLength(10);
 
-    const prompt = formatMessages(msgs, 'Asia/Jerusalem');
+    const { xml: prompt } = formatMessages(msgs, 'Asia/Jerusalem');
     const messageTagCount = (prompt.match(/<message /g) || []).length;
     expect(messageTagCount).toBe(10);
   });

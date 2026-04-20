@@ -252,7 +252,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const { xml: prompt, images: _images } = formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -302,10 +302,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         rawLen: raw.length,
         usage: result.usage ?? null,
       };
-      logger.info(
-        { group: group.name, ...auditEntry },
-        'agent-claim-audit',
-      );
+      logger.info({ group: group.name, ...auditEntry }, 'agent-claim-audit');
       try {
         const auditFile = path.join(
           resolveGroupFolderPath(group.folder),
@@ -547,7 +544,7 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const { xml: formatted, images: _images } = formatMessages(messagesToSend, TIMEZONE);
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(

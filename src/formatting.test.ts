@@ -65,7 +65,7 @@ describe('formatMessages', () => {
   const TZ = 'UTC';
 
   it('formats a single message as XML with context header', () => {
-    const result = formatMessages([makeMsg()], TZ);
+    const { xml: result } = formatMessages([makeMsg()], TZ);
     expect(result).toContain('<context timezone="UTC" />');
     expect(result).toContain('<message sender="Alice"');
     expect(result).toContain('>hello</message>');
@@ -87,7 +87,7 @@ describe('formatMessages', () => {
         timestamp: '2024-01-01T01:00:00.000Z',
       }),
     ];
-    const result = formatMessages(msgs, TZ);
+    const { xml: result } = formatMessages(msgs, TZ);
     expect(result).toContain('sender="Alice"');
     expect(result).toContain('sender="Bob"');
     expect(result).toContain('>hi</message>');
@@ -95,12 +95,12 @@ describe('formatMessages', () => {
   });
 
   it('escapes special characters in sender names', () => {
-    const result = formatMessages([makeMsg({ sender_name: 'A & B <Co>' })], TZ);
+    const { xml: result } = formatMessages([makeMsg({ sender_name: 'A & B <Co>' })], TZ);
     expect(result).toContain('sender="A &amp; B &lt;Co&gt;"');
   });
 
   it('escapes special characters in content', () => {
-    const result = formatMessages(
+    const { xml: result } = formatMessages(
       [makeMsg({ content: '<script>alert("xss")</script>' })],
       TZ,
     );
@@ -110,13 +110,13 @@ describe('formatMessages', () => {
   });
 
   it('handles empty array', () => {
-    const result = formatMessages([], TZ);
+    const { xml: result } = formatMessages([], TZ);
     expect(result).toContain('<context timezone="UTC" />');
     expect(result).toContain('<messages>\n\n</messages>');
   });
 
   it('renders reply context as quoted_message element', () => {
-    const result = formatMessages(
+    const { xml: result } = formatMessages(
       [
         makeMsg({
           content: 'Yes, on my way!',
@@ -135,13 +135,13 @@ describe('formatMessages', () => {
   });
 
   it('omits reply attributes when no reply context', () => {
-    const result = formatMessages([makeMsg()], TZ);
+    const { xml: result } = formatMessages([makeMsg()], TZ);
     expect(result).not.toContain('reply_to');
     expect(result).not.toContain('quoted_message');
   });
 
   it('omits quoted_message when content is missing but id is present', () => {
-    const result = formatMessages(
+    const { xml: result } = formatMessages(
       [
         makeMsg({
           reply_to_message_id: '42',
@@ -155,7 +155,7 @@ describe('formatMessages', () => {
   });
 
   it('escapes special characters in reply context', () => {
-    const result = formatMessages(
+    const { xml: result } = formatMessages(
       [
         makeMsg({
           reply_to_message_id: '1',
@@ -173,7 +173,7 @@ describe('formatMessages', () => {
 
   it('converts timestamps to local time for given timezone', () => {
     // 2024-01-01T18:30:00Z in America/New_York (EST) = 1:30 PM
-    const result = formatMessages(
+    const { xml: result } = formatMessages(
       [makeMsg({ timestamp: '2024-01-01T18:30:00.000Z' })],
       'America/New_York',
     );
