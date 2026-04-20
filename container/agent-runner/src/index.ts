@@ -24,6 +24,12 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
+type ImageAttachment = {
+  mediaType: 'image/jpeg';
+  base64: string;
+  sourceKey: string;
+};
+
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -33,6 +39,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  images?: ImageAttachment[];
 }
 
 interface TokenUsage {
@@ -62,14 +69,21 @@ interface SessionsIndex {
   entries: SessionEntry[];
 }
 
+type ContentBlockParam =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: 'image/jpeg'; data: string } };
+
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlockParam[] };
   parent_tool_use_id: null;
   session_id: string;
 }
 
-const IPC_INPUT_DIR = '/workspace/ipc/input';
+let IPC_INPUT_DIR = '/workspace/ipc/input';
+export function _setIpcInputDir(dir: string): void {
+  IPC_INPUT_DIR = dir;
+}
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 const IPC_EVENTS_DIR = '/workspace/ipc/events';
@@ -94,15 +108,29 @@ function writeAgentEvent(event: object): void {
  * Push-based async iterable for streaming user messages to the SDK.
  * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
  */
-class MessageStream {
+export class MessageStream {
   private queue: SDKUserMessage[] = [];
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(text: string, images?: ImageAttachment[]): void {
+    const content =
+      images && images.length > 0
+        ? [
+            { type: 'text' as const, text },
+            ...images.map((img) => ({
+              type: 'image' as const,
+              source: {
+                type: 'base64' as const,
+                media_type: img.mediaType,
+                data: img.base64,
+              },
+            })),
+          ]
+        : text;
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -332,9 +360,9 @@ function shouldClose(): boolean {
 
 /**
  * Drain all pending IPC input messages.
- * Returns messages found, or empty array.
+ * Returns structured messages found, or empty array.
  */
-function drainIpcInput(): string[] {
+export function drainIpcInput(): Array<{ text: string; images?: ImageAttachment[] }> {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs
@@ -342,14 +370,18 @@ function drainIpcInput(): string[] {
       .filter((f) => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const messages: Array<{ text: string; images?: ImageAttachment[] }> = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+          const entry: { text: string; images?: ImageAttachment[] } = { text: data.text };
+          if (Array.isArray(data.images) && data.images.length > 0) {
+            entry.images = data.images as ImageAttachment[];
+          }
+          messages.push(entry);
         }
       } catch (err) {
         log(
@@ -371,9 +403,9 @@ function drainIpcInput(): string[] {
 
 /**
  * Wait for a new IPC message or _close sentinel.
- * Returns the messages as a single string, or null if _close.
+ * Returns the first drained message, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<{ text: string; images?: ImageAttachment[] } | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
@@ -382,7 +414,7 @@ function waitForIpcMessage(): Promise<string | null> {
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages.join('\n'));
+        resolve(messages[0]);
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -407,13 +439,14 @@ async function runQuery(
   runId?: string,
   seqRef?: { value: number },
   startedAt?: number,
+  promptImages?: ImageAttachment[],
 ): Promise<{
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
 }> {
   const stream = new MessageStream();
-  stream.push(prompt);
+  stream.push(prompt, promptImages);
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
@@ -428,9 +461,9 @@ async function runQuery(
       return;
     }
     const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    for (const m of messages) {
+      log(`Piping IPC message into active query (${m.text.length} chars)`);
+      stream.push(m.text, m.images);
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -620,10 +653,6 @@ async function runQuery(
       log(
         `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
       );
-      emitEvent('final', {
-        text: textResult ?? '',
-        elapsedMs: startedAt !== undefined ? Date.now() - startedAt : 0,
-      });
       // Extract token usage from SDKResultMessage so the host can render it
       // in the outbound message footer (per-group toggle: showTokenFooter).
       const r = message as {
@@ -644,6 +673,13 @@ async function runQuery(
             numTurns: r.num_turns ?? 0,
           }
         : undefined;
+      // Include usage in 'final' event so card-rendering channels (Feishu)
+      // can append the token footer themselves — they bypass channel.sendMessage.
+      emitEvent('final', {
+        text: textResult ?? '',
+        elapsedMs: startedAt !== undefined ? Date.now() - startedAt : 0,
+        usage,
+      });
       writeOutput({
         status: 'success',
         result: textResult || null,
@@ -760,13 +796,14 @@ async function main(): Promise<void> {
 
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
+  let promptImages: ImageAttachment[] | undefined = containerInput.images;
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    prompt += '\n' + pending.map((m) => m.text).join('\n');
   }
 
   // Script phase: run script before waking agent
@@ -815,7 +852,10 @@ async function main(): Promise<void> {
         runId,
         seqRef,
         startedAt,
+        promptImages,
       );
+      // Images only apply to the first turn
+      promptImages = undefined;
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -843,8 +883,9 @@ async function main(): Promise<void> {
         break;
       }
 
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
+      log(`Got new message (${nextMessage.text.length} chars), starting new query`);
+      prompt = nextMessage.text;
+      promptImages = nextMessage.images;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
