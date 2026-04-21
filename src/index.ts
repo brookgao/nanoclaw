@@ -252,10 +252,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const { xml: prompt, images } = formatMessages(
-    missedMessages,
-    TIMEZONE,
-  );
+  const { xml: prompt, images } = formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -549,12 +546,12 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const { xml: formatted, images: _images } = formatMessages(
+          const { xml: formatted, images } = formatMessages(
             messagesToSend,
             TIMEZONE,
           );
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(chatJid, formatted, images)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
