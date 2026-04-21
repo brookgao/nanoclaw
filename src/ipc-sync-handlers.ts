@@ -17,12 +17,14 @@ export interface CreateTopicGroupDeps {
       description: string;
     }): Promise<{ chat_id: string }>;
     inviteMembers(chatId: string, openIds: string[]): Promise<void>;
+    sendMessage(jid: string, text: string): Promise<void>;
   };
   setRegisteredGroup: (jid: string, group: RegisteredGroup) => void;
   onGroupRegistered: (jid: string, group: RegisteredGroup) => void;
   sourceGroupJid: (folder: string) => string | null;
   lookupRequesterOpenId: (jid: string) => string | null;
   projectRoot: string;
+  ensureOneCliAgent?: (jid: string, group: RegisteredGroup) => void;
 }
 
 export async function handleCreateTopicGroup(
@@ -76,6 +78,18 @@ export async function handleCreateTopicGroup(
     deps.setRegisteredGroup(jid, group);
     deps.onGroupRegistered(jid, group);
     db_registered = true;
+
+    // Ensure OneCLI agent entry exists for credential routing.
+    // Fire-and-forget inside ensureOneCliAgent; safe to call.
+    if (deps.ensureOneCliAgent) {
+      try {
+        deps.ensureOneCliAgent(jid, group);
+      } catch (err) {
+        warnings.push(
+          `onecli_ensure_failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   } catch (err) {
     const m = err instanceof Error ? err.message : String(err);
     warnings.push(`db_register_failed: ${m}`);
@@ -96,8 +110,7 @@ export async function handleCreateTopicGroup(
     const mdPath = path.join(groupDir, 'CLAUDE.md');
     if (!fs.existsSync(mdPath) && fs.existsSync(tmplPath)) {
       const tmpl = fs.readFileSync(tmplPath, 'utf-8');
-      const appended =
-        tmpl + `\n\n## Topic\n\n${req.topic_description}\n`;
+      const appended = tmpl + `\n\n## Topic\n\n${req.topic_description}\n`;
       fs.writeFileSync(mdPath, appended);
     }
     folder_initialized = true;
@@ -107,6 +120,19 @@ export async function handleCreateTopicGroup(
     logger.warn(
       { folder: req.folder, err: m },
       '[sync-ipc] folder init failed',
+    );
+  }
+
+  // Step f — Welcome message in new chat (non-fatal)
+  try {
+    const welcome = `🎉 新群就绪\n\n**话题**：${req.topic_description}\n\n直接发消息即可，不用 @ 我。`;
+    await deps.feishuChannel.sendMessage(`feishu:${chat_id}`, welcome);
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    warnings.push(`welcome_failed: ${m}`);
+    logger.warn(
+      { chat_id, err: m },
+      '[sync-ipc] welcome message send failed',
     );
   }
 

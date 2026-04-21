@@ -823,6 +823,7 @@ async function main(): Promise<void> {
           },
           lookupRequesterOpenId: getLatestUserSenderForChat,
           projectRoot: process.cwd(),
+          ensureOneCliAgent: ensureOneCLIAgent,
         }
       : undefined,
   });

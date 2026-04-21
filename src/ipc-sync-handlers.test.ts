@@ -19,12 +19,14 @@ function makeDeps(overrides: any = {}) {
       feishuChannel: {
         createChat: vi.fn().mockResolvedValue({ chat_id: 'oc_new' }),
         inviteMembers: vi.fn().mockResolvedValue(undefined),
+        sendMessage: vi.fn().mockResolvedValue(undefined),
       } as any,
       setRegisteredGroup: vi.fn(),
       onGroupRegistered: vi.fn(),
       sourceGroupJid: vi.fn().mockReturnValue('feishu:oc_source'),
       lookupRequesterOpenId: vi.fn().mockReturnValue('ou_requester'),
       projectRoot: tmpRoot,
+      ensureOneCliAgent: vi.fn(),
       ...overrides,
     },
   };
@@ -203,5 +205,46 @@ describe('handleCreateTopicGroup', () => {
         deps,
       ),
     ).rejects.toThrow(/no recent user message/i);
+  });
+
+  it('happy path also calls ensureOneCliAgent and sends welcome', async () => {
+    const { deps } = setup();
+
+    await handleCreateTopicGroup(
+      {
+        name: 'Pipeline 建设',
+        folder: 'feishu_pipeline',
+        topic_description: '讨论 pipeline',
+      },
+      'feishu_main',
+      deps,
+    );
+
+    expect(deps.ensureOneCliAgent).toHaveBeenCalledWith(
+      'feishu:oc_new',
+      expect.objectContaining({ folder: 'feishu_pipeline' }),
+    );
+    expect(deps.feishuChannel.sendMessage).toHaveBeenCalledWith(
+      'feishu:oc_new',
+      expect.stringContaining('新群就绪'),
+    );
+  });
+
+  it('welcome send failure: records warning, does not affect other flags', async () => {
+    const { deps } = setup();
+    deps.feishuChannel.sendMessage = vi
+      .fn()
+      .mockRejectedValue(new Error('api offline'));
+
+    const resp = await handleCreateTopicGroup(
+      { name: 'x', folder: 'feishu_x', topic_description: 'y' },
+      'feishu_main',
+      deps,
+    );
+
+    expect(resp.user_invited).toBe(true);
+    expect(resp.db_registered).toBe(true);
+    expect(resp.folder_initialized).toBe(true);
+    expect(resp.warnings).toEqual([expect.stringContaining('welcome_failed')]);
   });
 });
