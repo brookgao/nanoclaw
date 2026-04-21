@@ -591,3 +591,53 @@ describe('FeishuChannel image pipeline', () => {
     expect(onMessage.mock.calls[0][1].images).toBeUndefined();
   });
 });
+
+describe('FeishuChannel.createChat', () => {
+  it('calls im.chat.create with correct payload and returns chat_id', async () => {
+    const ch = new (await import('./feishu.js')).FeishuChannel(
+      'app_id_test',
+      'app_secret_test',
+      makeOpts(),
+    );
+    const createSpy = vi
+      .fn()
+      .mockResolvedValue({ data: { chat_id: 'oc_new_chat_xyz' } });
+    (ch as any).client = {
+      im: { chat: { create: createSpy } },
+    };
+    (ch as any).botOpenId = 'ou_bot';
+
+    const result = await ch.createChat({
+      name: 'Pipeline 建设',
+      description: '讨论 pipeline 的建设与改造',
+    });
+
+    expect(result).toEqual({ chat_id: 'oc_new_chat_xyz' });
+    expect(createSpy).toHaveBeenCalledWith({
+      data: {
+        name: 'Pipeline 建设',
+        description: '讨论 pipeline 的建设与改造',
+        chat_mode: 'group',
+        chat_type: 'private',
+        owner_id: 'ou_bot',
+      },
+      params: { user_id_type: 'open_id' },
+    });
+  });
+
+  it('throws if response has no chat_id', async () => {
+    const ch = new (await import('./feishu.js')).FeishuChannel(
+      'id',
+      'secret',
+      makeOpts(),
+    );
+    (ch as any).client = {
+      im: { chat: { create: vi.fn().mockResolvedValue({ data: {} }) } },
+    };
+    (ch as any).botOpenId = 'ou_bot';
+
+    await expect(
+      ch.createChat({ name: 'x', description: 'y' }),
+    ).rejects.toThrow(/no chat_id/);
+  });
+});

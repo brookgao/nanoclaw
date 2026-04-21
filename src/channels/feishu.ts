@@ -683,6 +683,25 @@ export class FeishuChannel implements Channel {
     }
   }
 
+  async createChat(args: {
+    name: string;
+    description: string;
+  }): Promise<{ chat_id: string }> {
+    const res: any = await this.client.im.chat.create({
+      data: {
+        name: args.name,
+        description: args.description,
+        chat_mode: 'group',
+        chat_type: 'private',
+        owner_id: this.botOpenId,
+      },
+      params: { user_id_type: 'open_id' },
+    });
+    const chat_id = res?.data?.chat_id ?? res?.chat_id;
+    if (!chat_id) throw new Error('im.chat.create returned no chat_id');
+    return { chat_id };
+  }
+
   private async schedulePatch(jid: string, immediate = false): Promise<void> {
     const session = this.cardSessions.get(jid);
     if (!session) return;
