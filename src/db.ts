@@ -32,6 +32,7 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      images TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -107,6 +108,13 @@ function createSchema(database: Database.Database): void {
   // Add script column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN script TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
+  // Add images column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN images TEXT`);
   } catch {
     /* column already exists */
   }
@@ -296,7 +304,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, images) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -309,6 +317,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_message_id ?? null,
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
+    msg.images && msg.images.length > 0 ? JSON.stringify(msg.images) : null,
   );
 }
 
@@ -354,7 +363,7 @@ export function getNewMessages(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name, images
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -364,9 +373,12 @@ export function getNewMessages(
     ) ORDER BY timestamp
   `;
 
-  const rows = db
+  const rawRows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as (NewMessage & {
+    images: string | null;
+  })[];
+  const rows = rawRows.map(hydrateImages);
 
   let newTimestamp = lastTimestamp;
   for (const row of rows) {
@@ -374,6 +386,21 @@ export function getNewMessages(
   }
 
   return { messages: rows, newTimestamp };
+}
+
+function hydrateImages(
+  row: NewMessage & { images?: string | null },
+): NewMessage {
+  if (!row.images || typeof row.images !== 'string') {
+    delete (row as { images?: unknown }).images;
+    return row;
+  }
+  try {
+    (row as NewMessage).images = JSON.parse(row.images);
+  } catch {
+    delete (row as { images?: unknown }).images;
+  }
+  return row;
 }
 
 export function getMessagesSince(
@@ -388,7 +415,7 @@ export function getMessagesSince(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name, images
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -397,9 +424,12 @@ export function getMessagesSince(
       LIMIT ?
     ) ORDER BY timestamp
   `;
-  return db
+  const rawRows = db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as (NewMessage & {
+    images: string | null;
+  })[];
+  return rawRows.map(hydrateImages);
 }
 
 export function getLastBotMessageTimestamp(
