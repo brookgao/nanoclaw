@@ -10,6 +10,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import { callSync } from './ipc-sync.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -19,6 +20,15 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+
+type CreateTopicGroupResp = {
+  chat_id: string;
+  folder: string;
+  user_invited: boolean;
+  db_registered: boolean;
+  folder_initialized: boolean;
+  warnings: string[];
+};
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -500,6 +510,76 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         },
       ],
     };
+  },
+);
+
+server.tool(
+  'create_topic_group',
+  `Create a new Feishu topic group and pull the user in. Main group or feishu_dm only.
+
+Use this when the user wants to spin off a dedicated discussion space for a new topic
+(e.g., "开个聊 X 的群", "这块另起一个群聊"). You should:
+1. Propose a group name based on conversation context
+2. Confirm with the user (show the proposed name, let them override)
+3. Call this tool with the confirmed name, a folder (e.g. "feishu_pipeline"), and a short topic description
+
+Returns a status summary including the new chat_id.`,
+  {
+    name: z.string().describe(
+      'Display name for the new group (e.g., "pipeline 建设"). User-confirmed.',
+    ),
+    folder: z.string().describe(
+      'Channel-prefixed folder name, lowercase Latin + hyphens for suffix (e.g., "feishu_pipeline", "feishu_harness"). Matches existing naming like feishu_langgraph-fix.',
+    ),
+    topic_description: z.string().describe(
+      "One-line topic summary appended to the new group's CLAUDE.md.",
+    ),
+  },
+  async (args) => {
+    if (!isMain && groupFolder !== 'feishu_dm') {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: '只有主群和阿飞 DM 能建话题群。',
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    try {
+      const result = await callSync<
+        { name: string; folder: string; topic_description: string },
+        CreateTopicGroupResp
+      >(
+        'create_topic_group',
+        {
+          name: args.name,
+          folder: args.folder,
+          topic_description: args.topic_description,
+        },
+        20000,
+      );
+
+      const allOk =
+        result.user_invited && result.db_registered && result.folder_initialized;
+      const text = allOk
+        ? `已开群「${args.name}」✅\n• chat_id: ${result.chat_id}\n• 你已被拉入\n• 已注册为 ${result.folder}\n• CLAUDE.md 已初始化`
+        : `群「${args.name}」已建好 ⚠️ 部分失败\n• chat_id: ${result.chat_id}\n• ${result.user_invited ? '✅' : '❌'} 拉你${result.user_invited ? '成功' : '失败'}\n• ${result.db_registered ? '✅' : '❌'} DB ${result.db_registered ? '已注册' : '注册失败'}\n• ${result.folder_initialized ? '✅' : '❌'} CLAUDE.md ${result.folder_initialized ? '已初始化' : '初始化失败'}${result.warnings.length ? '\n• warnings: ' + result.warnings.join('; ') : ''}\n你可能需要手动处理没打勾的部分。`;
+
+      return { content: [{ type: 'text' as const, text }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `建群失败：${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
   },
 );
 
