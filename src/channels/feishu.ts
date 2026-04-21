@@ -474,7 +474,7 @@ export class FeishuChannel implements Channel {
       this.reactAck(m.message_id); // 👀 immediately
       const result = await processImageKeys(
         parsed.imageKeys,
-        (k) => this.downloadImage(k),
+        (k) => this.downloadImage(m.message_id, k),
         logger,
       );
       if (result.failures.length > 0) {
@@ -583,12 +583,12 @@ export class FeishuChannel implements Channel {
       });
   }
 
-  async downloadImage(imageKey: string): Promise<Buffer> {
+  async downloadImage(messageId: string, imageKey: string): Promise<Buffer> {
     const res: any = await this.client.request(
       {
         method: 'GET',
-        url: `/open-apis/im/v1/images/${imageKey}`,
-        params: { type: 'message' },
+        url: `/open-apis/im/v1/messages/${messageId}/resources/${imageKey}`,
+        params: { type: 'image' },
         responseType: 'arraybuffer',
       },
       { maxContentLength: 10 * 1024 * 1024, timeout: 8000 },

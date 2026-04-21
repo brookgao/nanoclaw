@@ -60,7 +60,9 @@ function makeEvent(
         chat_id: overrides.chat_id ?? 'oc_p2p1',
         chat_type: overrides.chat_type ?? 'p2p',
         message_type: overrides.msg_type ?? 'text',
-        content: overrides.content ?? JSON.stringify({ text: overrides.text ?? 'hello' }),
+        content:
+          overrides.content ??
+          JSON.stringify({ text: overrides.text ?? 'hello' }),
         mentions: overrides.mentions ?? [],
       },
     },
@@ -482,7 +484,9 @@ describe('FeishuChannel image pipeline', () => {
           create: vi.fn().mockResolvedValue({}),
         },
         message: {
-          create: vi.fn().mockResolvedValue({ data: { message_id: 'om_reply' } }),
+          create: vi
+            .fn()
+            .mockResolvedValue({ data: { message_id: 'om_reply' } }),
         },
       },
     };
@@ -492,8 +496,10 @@ describe('FeishuChannel image pipeline', () => {
     const onMessage = vi.fn();
     const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
     ch.client = makeClientMock();
-    ch.downloadImage = vi.fn(async () =>
-      readFileSync('/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png'),
+    ch.downloadImage = vi.fn(async (_msgId: string, _key: string) =>
+      readFileSync(
+        '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
+      ),
     );
 
     await ch.handleEvent(
@@ -508,6 +514,11 @@ describe('FeishuChannel image pipeline', () => {
     expect(msg.images).toHaveLength(1);
     expect(msg.images[0].sourceKey).toBe('img_good');
     expect(msg.images[0].mediaType).toBe('image/jpeg');
+
+    expect(ch.downloadImage).toHaveBeenCalled();
+    const [firstCallMsgId, firstCallKey] = ch.downloadImage.mock.calls[0];
+    expect(firstCallMsgId).toBeTruthy();
+    expect(firstCallKey).toBe('img_good');
   });
 
   it('p2p image fail (404) → sendMessage with 🖼️, onMessage NOT called', async () => {
@@ -515,7 +526,7 @@ describe('FeishuChannel image pipeline', () => {
     const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
     ch.client = makeClientMock();
     const sendSpy = vi.spyOn(ch, 'sendMessage').mockResolvedValue(undefined);
-    ch.downloadImage = vi.fn(async () => {
+    ch.downloadImage = vi.fn(async (_msgId: string, _key: string) => {
       throw Object.assign(new Error('404'), { statusCode: 404 });
     });
 
@@ -540,8 +551,9 @@ describe('FeishuChannel image pipeline', () => {
     const good = readFileSync(
       '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
     );
-    ch.downloadImage = vi.fn(async (k: string) => {
-      if (k === 'a' || k === 'c') throw Object.assign(new Error('404'), { statusCode: 404 });
+    ch.downloadImage = vi.fn(async (_msgId: string, k: string) => {
+      if (k === 'a' || k === 'c')
+        throw Object.assign(new Error('404'), { statusCode: 404 });
       return good;
     });
 
