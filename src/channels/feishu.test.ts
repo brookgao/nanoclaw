@@ -323,7 +323,7 @@ describe('parseInbound', () => {
       botOpenId,
     );
     expect(r).toEqual({
-      text: '',
+      text: '[图片]',
       imageKeys: ['img_v3_abc'],
       botMentioned: false,
     });

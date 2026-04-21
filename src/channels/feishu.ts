@@ -250,6 +250,7 @@ export type ParsedInbound = {
 };
 
 const MAX_IMAGES_PER_MESSAGE = 5;
+const IMAGE_ONLY_PLACEHOLDER = '[图片]';
 
 export function parseInbound(
   m: {
@@ -276,7 +277,8 @@ export function parseInbound(
     try {
       const key = JSON.parse(m.content)?.image_key ?? '';
       if (!key) return null;
-      return { text: '', imageKeys: [key], botMentioned };
+      // Inject placeholder so downstream DB filter (content != '') lets it through.
+      return { text: IMAGE_ONLY_PLACEHOLDER, imageKeys: [key], botMentioned };
     } catch {
       return null;
     }
@@ -327,6 +329,8 @@ export function parseInbound(
   }
 
   if (!text && truncatedKeys.length === 0) return null;
+  // Inject placeholder so downstream DB filter (content != '') lets image-only posts through.
+  if (!text && truncatedKeys.length > 0) text = IMAGE_ONLY_PLACEHOLDER;
 
   return { text, imageKeys: truncatedKeys, botMentioned };
 }
