@@ -711,6 +711,22 @@ export class FeishuChannel implements Channel {
     return { chat_id };
   }
 
+  async inviteMembers(chatId: string, openIds: string[]): Promise<void> {
+    try {
+      await this.client.im.chatMembers.create({
+        path: { chat_id: chatId },
+        params: { member_id_type: 'open_id' },
+        data: { id_list: openIds },
+      });
+    } catch (err) {
+      logger.error(
+        { err: (err as Error).message, chatId, count: openIds.length },
+        '[feishu] inviteMembers failed',
+      );
+      throw err;
+    }
+  }
+
   private async schedulePatch(jid: string, immediate = false): Promise<void> {
     const session = this.cardSessions.get(jid);
     if (!session) return;

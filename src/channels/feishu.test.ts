@@ -641,3 +641,44 @@ describe('FeishuChannel.createChat', () => {
     ).rejects.toThrow(/no chat_id/);
   });
 });
+
+describe('FeishuChannel.inviteMembers', () => {
+  it('calls im.chatMembers.create with correct payload', async () => {
+    const ch = new (await import('./feishu.js')).FeishuChannel(
+      'id',
+      'secret',
+      makeOpts(),
+    );
+    const inviteSpy = vi.fn().mockResolvedValue({ data: {} });
+    (ch as any).client = {
+      im: { chatMembers: { create: inviteSpy } },
+    };
+
+    await ch.inviteMembers('oc_target', ['ou_alice', 'ou_bob']);
+
+    expect(inviteSpy).toHaveBeenCalledWith({
+      path: { chat_id: 'oc_target' },
+      params: { member_id_type: 'open_id' },
+      data: { id_list: ['ou_alice', 'ou_bob'] },
+    });
+  });
+
+  it('propagates API errors', async () => {
+    const ch = new (await import('./feishu.js')).FeishuChannel(
+      'id',
+      'secret',
+      makeOpts(),
+    );
+    (ch as any).client = {
+      im: {
+        chatMembers: {
+          create: vi.fn().mockRejectedValue(new Error('permission denied')),
+        },
+      },
+    };
+
+    await expect(
+      ch.inviteMembers('oc_x', ['ou_y']),
+    ).rejects.toThrow(/permission denied/);
+  });
+});
