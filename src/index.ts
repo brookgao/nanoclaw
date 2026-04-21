@@ -285,7 +285,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -340,7 +344,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (result.status === 'error') {
       hadError = true;
     }
-  });
+    },
+    images,
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
