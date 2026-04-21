@@ -49,6 +49,9 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { handleCreateTopicGroup } from './ipc-sync-handlers.js';
+import { getLatestUserSenderForChat } from './db.js';
+import { FeishuChannel } from './channels/feishu.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   restoreRemoteControl,
@@ -290,60 +293,63 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     prompt,
     chatJid,
     async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Audit Andy's <internal>依据:</internal> ritual compliance (Task A monitoring)
-      const yijuMatch = raw.match(/<internal>[\s\S]*?依据[:：]\s*(\S+)/);
-      const auditEntry = {
-        ts: new Date().toISOString(),
-        chatJid,
-        hasYiju: !!yijuMatch,
-        yijuKind: yijuMatch?.[1] ?? null,
-        rawLen: raw.length,
-        usage: result.usage ?? null,
-      };
-      logger.info({ group: group.name, ...auditEntry }, 'agent-claim-audit');
-      try {
-        const auditFile = path.join(
-          resolveGroupFolderPath(group.folder),
-          'memory',
-          'agent-claim-audit.jsonl',
-        );
-        fs.mkdirSync(path.dirname(auditFile), { recursive: true });
-        fs.appendFileSync(auditFile, JSON.stringify(auditEntry) + '\n');
-      } catch (err) {
-        logger.warn({ group: group.name, err }, 'Failed to write audit jsonl');
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Audit Andy's <internal>依据:</internal> ritual compliance (Task A monitoring)
+        const yijuMatch = raw.match(/<internal>[\s\S]*?依据[:：]\s*(\S+)/);
+        const auditEntry = {
+          ts: new Date().toISOString(),
+          chatJid,
+          hasYiju: !!yijuMatch,
+          yijuKind: yijuMatch?.[1] ?? null,
+          rawLen: raw.length,
+          usage: result.usage ?? null,
+        };
+        logger.info({ group: group.name, ...auditEntry }, 'agent-claim-audit');
+        try {
+          const auditFile = path.join(
+            resolveGroupFolderPath(group.folder),
+            'memory',
+            'agent-claim-audit.jsonl',
+          );
+          fs.mkdirSync(path.dirname(auditFile), { recursive: true });
+          fs.appendFileSync(auditFile, JSON.stringify(auditEntry) + '\n');
+        } catch (err) {
+          logger.warn(
+            { group: group.name, err },
+            'Failed to write audit jsonl',
+          );
+        }
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+        // Append token-usage footer when available and not disabled per-group
+        if (
+          text &&
+          result.usage &&
+          group.containerConfig?.showTokenFooter !== false
+        ) {
+          text = appendTokenFooter(text, result.usage);
+        }
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      // Append token-usage footer when available and not disabled per-group
-      if (
-        text &&
-        result.usage &&
-        group.containerConfig?.showTokenFooter !== false
-      ) {
-        text = appendTokenFooter(text, result.usage);
-      }
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
-      }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
+      if (result.status === 'error') {
+        hadError = true;
+      }
     },
     images,
   );
@@ -738,6 +744,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const feishuChannel = channels.find(
+    (c): c is FeishuChannel => c.name === 'feishu',
+  );
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -795,6 +805,26 @@ async function main(): Promise<void> {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
     },
+    handleCreateTopicGroup,
+    createTopicGroupDeps: feishuChannel
+      ? {
+          feishuChannel,
+          setRegisteredGroup: (jid: string, group: RegisteredGroup) => {
+            setRegisteredGroup(jid, group);
+          },
+          onGroupRegistered: (jid: string, group: RegisteredGroup) => {
+            registeredGroups[jid] = group;
+          },
+          sourceGroupJid: (folder: string) => {
+            for (const [jid, g] of Object.entries(registeredGroups)) {
+              if (g.folder === folder) return jid;
+            }
+            return null;
+          },
+          lookupRequesterOpenId: getLatestUserSenderForChat,
+          projectRoot: process.cwd(),
+        }
+      : undefined,
   });
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
