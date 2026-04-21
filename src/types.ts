@@ -145,3 +145,20 @@ export type OnChatMetadata = (
   channel?: string,
   isGroup?: boolean,
 ) => void;
+
+// --- Sync IPC: create_topic_group ---
+
+export type CreateTopicGroupReq = {
+  name: string;
+  folder: string;
+  topic_description: string;
+};
+
+export type CreateTopicGroupResp = {
+  chat_id: string;
+  folder: string;
+  user_invited: boolean;
+  db_registered: boolean;
+  folder_initialized: boolean;
+  warnings: string[];
+};
