@@ -695,7 +695,6 @@ export class FeishuChannel implements Channel {
           description: args.description,
           chat_mode: 'group',
           chat_type: 'private',
-          owner_id: this.botOpenId,
         },
         params: { user_id_type: 'open_id' },
       });

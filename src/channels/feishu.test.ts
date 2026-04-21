@@ -619,7 +619,6 @@ describe('FeishuChannel.createChat', () => {
         description: '讨论 pipeline 的建设与改造',
         chat_mode: 'group',
         chat_type: 'private',
-        owner_id: 'ou_bot',
       },
       params: { user_id_type: 'open_id' },
     });
@@ -677,8 +676,8 @@ describe('FeishuChannel.inviteMembers', () => {
       },
     };
 
-    await expect(
-      ch.inviteMembers('oc_x', ['ou_y']),
-    ).rejects.toThrow(/permission denied/);
+    await expect(ch.inviteMembers('oc_x', ['ou_y'])).rejects.toThrow(
+      /permission denied/,
+    );
   });
 });
