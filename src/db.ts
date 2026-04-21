@@ -694,6 +694,17 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   );
 }
 
+export function getLatestUserSenderForChat(chatJid: string): string | null {
+  const row = db
+    .prepare(
+      `SELECT sender FROM messages
+       WHERE chat_jid = ? AND is_from_me = 0 AND is_bot_message = 0
+       ORDER BY timestamp DESC LIMIT 1`,
+    )
+    .get(chatJid) as { sender: string } | undefined;
+  return row?.sender ?? null;
+}
+
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
   const rows = db.prepare('SELECT * FROM registered_groups').all() as Array<{
     jid: string;
