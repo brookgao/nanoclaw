@@ -83,6 +83,7 @@ Andy's knowledge base. Read this on startup for a global view.
 - [stale-container](learnings/nanoclaw/nanoclaw-stale-container.md) — 改完代码必须 kill 旧容器
 - [dual-account-isolation](learnings/nanoclaw/nanoclaw-dual-account-isolation.md) — 双 Max 账号隔离避免 529
 - [session-management](learnings/nanoclaw/nanoclaw-session-management.md) — Context rot 与五条岔路决策框架
+- [feishu-image-vision](learnings/nanoclaw/nanoclaw-feishu-image-vision.md) — 飞书图片多模态链路：8 层穿透 + BuildKit 缓存坑 + DB schema
 
 ## Learnings — General
 
