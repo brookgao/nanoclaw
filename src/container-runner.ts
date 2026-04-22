@@ -294,6 +294,13 @@ export async function buildContainerArgs(
   // Skip when the per-group extraEnv already provides one (extraEnv runs after).
   if (GH_TOKEN && !group?.containerConfig?.extraEnv?.GH_TOKEN) {
     args.push('-e', 'GH_TOKEN');
+    // Bypass the OneCLI proxy for GitHub: OneCLI is injected (HTTPS_PROXY) to
+    // intercept Anthropic traffic, but it returns 401 for github.com because
+    // it has no GitHub credentials. Tell git/gh/curl to talk to GitHub
+    // directly so our GH_TOKEN-based auth actually reaches GitHub.
+    const githubHosts =
+      'github.com,api.github.com,codeload.github.com,raw.githubusercontent.com,objects.githubusercontent.com';
+    args.push('-e', `NO_PROXY=${githubHosts}`, '-e', `no_proxy=${githubHosts}`);
   }
 
   // Per-group custom env vars from registered_groups.container_config.extraEnv
