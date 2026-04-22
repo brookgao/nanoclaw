@@ -11,6 +11,7 @@ import {
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   DATA_DIR,
+  GH_TOKEN,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   ONECLI_URL,
@@ -218,6 +219,8 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'sync_requests'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'sync_responses'), { recursive: true });
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -280,6 +283,25 @@ export async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // GitHub credentials — propagated to every container so any group can
+  // `git push` / `gh pr create` without a per-group setup step. Entrypoint
+  // wires the token into git config so HTTPS and SSH-style remotes both work.
+  // Use docker's `-e KEY` (no value) form: docker reads the value from its
+  // own environment at spawn time, so the token never appears on the docker
+  // CLI argv (visible via `ps`, `/proc/<pid>/cmdline`). The host injects
+  // GH_TOKEN into the docker child's env in the spawn() call below.
+  // Skip when the per-group extraEnv already provides one (extraEnv runs after).
+  if (GH_TOKEN && !group?.containerConfig?.extraEnv?.GH_TOKEN) {
+    args.push('-e', 'GH_TOKEN');
+    // Bypass the OneCLI proxy for GitHub: OneCLI is injected (HTTPS_PROXY) to
+    // intercept Anthropic traffic, but it returns 401 for github.com because
+    // it has no GitHub credentials. Tell git/gh/curl to talk to GitHub
+    // directly so our GH_TOKEN-based auth actually reaches GitHub.
+    const githubHosts =
+      'github.com,api.github.com,codeload.github.com,raw.githubusercontent.com,objects.githubusercontent.com';
+    args.push('-e', `NO_PROXY=${githubHosts}`, '-e', `no_proxy=${githubHosts}`);
+  }
 
   // Per-group custom env vars from registered_groups.container_config.extraEnv
   // Used for things like GH_TOKEN that the agent's bash subprocess needs.
@@ -444,6 +466,9 @@ export async function runContainerAgent(
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Inject GH_TOKEN into the docker CLI's env so the bare `-e GH_TOKEN`
+      // arg in containerArgs picks it up without exposing it on argv.
+      env: GH_TOKEN ? { ...process.env, GH_TOKEN } : process.env,
     });
 
     onProcess(container, containerName);

@@ -653,13 +653,13 @@ export class FeishuChannel implements Channel {
     if (!this.ownsJid(jid)) {
       throw new Error(`FeishuChannel cannot send to non-feishu jid: ${jid}`);
     }
-    // If a card session is active for this jid, suppress the plain-text message —
-    // the card's final event already handles the text. This prevents duplicate output.
-    const activeCard = this.cardSessions.get(jid);
-    if (activeCard?.messageId) {
+    // When a card session with a messageId is active, the final text will be
+    // patched into the card via onAgentEvent('final'). Sending a plain message
+    // here too would produce a duplicate.
+    if (this.cardSessions.get(jid)?.messageId) {
       logger.debug(
         { jid },
-        '[feishu] suppressed plain-text (card session active)',
+        '[feishu] sendMessage suppressed: card session active',
       );
       return;
     }
@@ -680,6 +680,49 @@ export class FeishuChannel implements Channel {
         '[feishu] send failed',
       );
       // Swallow: orchestrator stays alive.
+    }
+  }
+
+  async createChat(args: {
+    name: string;
+    description: string;
+  }): Promise<{ chat_id: string }> {
+    let res: any;
+    try {
+      res = await this.client.im.chat.create({
+        data: {
+          name: args.name,
+          description: args.description,
+          chat_mode: 'group',
+          chat_type: 'private',
+        },
+        params: { user_id_type: 'open_id' },
+      });
+    } catch (err) {
+      logger.error(
+        { err: (err as Error).message, name: args.name },
+        '[feishu] createChat failed',
+      );
+      throw err;
+    }
+    const chat_id = res?.data?.chat_id ?? res?.chat_id;
+    if (!chat_id) throw new Error('im.chat.create returned no chat_id');
+    return { chat_id };
+  }
+
+  async inviteMembers(chatId: string, openIds: string[]): Promise<void> {
+    try {
+      await this.client.im.chatMembers.create({
+        path: { chat_id: chatId },
+        params: { member_id_type: 'open_id' },
+        data: { id_list: openIds },
+      });
+    } catch (err) {
+      logger.error(
+        { err: (err as Error).message, chatId, count: openIds.length },
+        '[feishu] inviteMembers failed',
+      );
+      throw err;
     }
   }
 
@@ -734,6 +777,20 @@ export class FeishuChannel implements Channel {
       // only create when we see the first tool_use. Zero-tool answers (e.g. 2+2=4)
       // fall through to plain sendMessage() below, avoiding a useless card shell.
       const existing = this.cardSessions.get(jid);
+
+      // A duplicate start with the same runId comes from SDK auto-compact
+      // emitting a fresh system/init inside the same agent run. Resetting
+      // would orphan the live Feishu card and wipe tool history, so keep
+      // the session intact and let subsequent tool_use events patch the
+      // existing card.
+      if (existing && existing.runId === event.runId) {
+        logger.debug(
+          { jid, runId: event.runId },
+          '[feishu] ignoring duplicate start for same runId (likely SDK compact)',
+        );
+        return;
+      }
+
       if (existing?.debounceTimer) clearTimeout(existing.debounceTimer);
       if (existing?.heartbeatTimer) clearInterval(existing.heartbeatTimer);
 

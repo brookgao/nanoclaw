@@ -10,6 +10,8 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'TZ',
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
 ]);
 
 export const ASSISTANT_NAME =
@@ -52,6 +54,12 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
+
+// GitHub credential — propagated into every container so any group can push
+// branches and open PRs. Read from .env only, never from process.env: the
+// readEnvFile contract (see env.ts) is to keep secrets out of the host
+// process env so they don't leak to spawned children (docker, OneCLI, etc.).
+export const GH_TOKEN = envConfig.GH_TOKEN ?? envConfig.GITHUB_TOKEN;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,

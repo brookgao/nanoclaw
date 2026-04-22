@@ -95,7 +95,10 @@ describe('formatMessages', () => {
   });
 
   it('escapes special characters in sender names', () => {
-    const { xml: result } = formatMessages([makeMsg({ sender_name: 'A & B <Co>' })], TZ);
+    const { xml: result } = formatMessages(
+      [makeMsg({ sender_name: 'A & B <Co>' })],
+      TZ,
+    );
     expect(result).toContain('sender="A &amp; B &lt;Co&gt;"');
   });
 

@@ -52,6 +52,7 @@ The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
 - `cancel_task` — cancel and delete a task
 - `update_task` — update an existing task
 - `register_group` — register a new chat/group (main only)
+- `create_topic_group` — create a brand-new Feishu topic group + auto-register (main/DM only). Use when user wants to spin off a new discussion space. Propose name → confirm with user → call with name, folder, topic_description.
 
 ### 4. Container skills (Bash tools)
 
@@ -84,7 +85,7 @@ Present the report as a clean, readable message. Example:
 • Core: Bash, Read, Write, Edit, Glob, Grep
 • Web: WebSearch, WebFetch
 • Orchestration: Task, TeamCreate, SendMessage
-• MCP: send_message, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
+• MCP: send_message, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group, create_topic_group
 
 *Container Tools:*
 • agent-browser: ✓

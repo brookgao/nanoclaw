@@ -7,8 +7,14 @@ import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
+import type { CreateTopicGroupDeps } from './ipc-sync-handlers.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import {
+  AgentEvent,
+  CreateTopicGroupReq,
+  CreateTopicGroupResp,
+  RegisteredGroup,
+} from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -23,6 +29,13 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  onAgentEvent: (jid: string, event: AgentEvent) => Promise<void>;
+  handleCreateTopicGroup?: (
+    req: CreateTopicGroupReq,
+    sourceGroupFolder: string,
+    deps: CreateTopicGroupDeps,
+  ) => Promise<CreateTopicGroupResp>;
+  createTopicGroupDeps?: CreateTopicGroupDeps;
 }
 
 let ipcWatcherRunning = false;
@@ -144,6 +157,75 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process agent events from this group's IPC directory
+      const eventsDir = path.join(ipcBaseDir, sourceGroup, 'events');
+      try {
+        if (fs.existsSync(eventsDir)) {
+          const eventFiles = fs
+            .readdirSync(eventsDir)
+            .filter((f) => f.endsWith('.json'))
+            .sort(); // process in seq order
+          for (const file of eventFiles) {
+            const filePath = path.join(eventsDir, file);
+            try {
+              const event: AgentEvent = JSON.parse(
+                fs.readFileSync(filePath, 'utf-8'),
+              );
+              fs.unlinkSync(filePath);
+              if (event.type === 'agent_event' && event.chatJid) {
+                await deps.onAgentEvent(event.chatJid, event);
+              }
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC agent event',
+              );
+              try {
+                fs.unlinkSync(filePath);
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC events directory',
+        );
+      }
+
+      // Process sync requests from this group's IPC directory
+      const syncReqDir = path.join(ipcBaseDir, sourceGroup, 'sync_requests');
+      try {
+        if (
+          fs.existsSync(syncReqDir) &&
+          deps.handleCreateTopicGroup &&
+          deps.createTopicGroupDeps
+        ) {
+          const syncFiles = fs
+            .readdirSync(syncReqDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of syncFiles) {
+            const fp = path.join(syncReqDir, file);
+            await processSyncRequest(
+              fp,
+              path.join(ipcBaseDir, sourceGroup),
+              sourceGroup,
+              {
+                handleCreateTopicGroup: deps.handleCreateTopicGroup,
+                createTopicGroupDeps: deps.createTopicGroupDeps,
+              },
+            );
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err: (err as Error).message, sourceGroup },
+          '[ipc] sync_requests scan error',
+        );
       }
     }
 
@@ -465,4 +547,77 @@ export async function processTaskIpc(
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
+}
+
+type SyncRequestDeps = {
+  handleCreateTopicGroup: (
+    req: CreateTopicGroupReq,
+    sourceGroupFolder: string,
+    deps: CreateTopicGroupDeps,
+  ) => Promise<CreateTopicGroupResp>;
+  createTopicGroupDeps: CreateTopicGroupDeps;
+};
+
+export async function processSyncRequest(
+  reqFilePath: string,
+  groupIpcDir: string,
+  sourceGroup: string,
+  deps: SyncRequestDeps,
+): Promise<void> {
+  const reqId = path.basename(reqFilePath, '.json');
+  const respPath = path.join(groupIpcDir, 'sync_responses', `${reqId}.json`);
+  let payload: any;
+  try {
+    payload = JSON.parse(fs.readFileSync(reqFilePath, 'utf-8'));
+  } catch (err) {
+    writeSyncResponseAtomic(respPath, {
+      error: `invalid_json: ${(err as Error).message}`,
+    });
+    try {
+      fs.unlinkSync(reqFilePath);
+    } catch {
+      /* noop */
+    }
+    return;
+  }
+
+  try {
+    let data: unknown;
+    if (payload.action === 'create_topic_group') {
+      if (sourceGroup !== 'feishu_main' && sourceGroup !== 'feishu_dm') {
+        throw new Error(
+          'not authorized: create_topic_group only from main or DM',
+        );
+      }
+      data = await deps.handleCreateTopicGroup(
+        {
+          name: payload.name,
+          folder: payload.folder,
+          topic_description: payload.topic_description,
+        },
+        sourceGroup,
+        deps.createTopicGroupDeps,
+      );
+    } else {
+      throw new Error(`unknown sync action: ${payload.action}`);
+    }
+    writeSyncResponseAtomic(respPath, { data });
+  } catch (err) {
+    writeSyncResponseAtomic(respPath, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    try {
+      fs.unlinkSync(reqFilePath);
+    } catch {
+      /* noop */
+    }
+  }
+}
+
+function writeSyncResponseAtomic(respPath: string, body: object): void {
+  fs.mkdirSync(path.dirname(respPath), { recursive: true });
+  const tmp = `${respPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(body));
+  fs.renameSync(tmp, respPath);
 }

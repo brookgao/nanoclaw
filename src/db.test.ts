@@ -7,6 +7,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
+  getLatestUserSenderForChat,
   getMessagesSince,
   getNewMessages,
   getTaskById,
@@ -648,5 +649,63 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- getLatestUserSenderForChat ---
+
+describe('getLatestUserSenderForChat', () => {
+  it('returns the open_id of the most recent non-bot, non-self user message', () => {
+    const jid = 'feishu:oc_test_chat';
+    storeChatMetadata(jid, '2026-04-20T10:00:00Z', 'Test');
+    storeMessage({
+      id: 'm1',
+      chat_jid: jid,
+      sender: 'ou_alice',
+      sender_name: 'Alice',
+      content: 'first',
+      timestamp: '2026-04-20T10:00:00Z',
+      is_from_me: false,
+    });
+    storeMessage({
+      id: 'm2',
+      chat_jid: jid,
+      sender: 'ou_bot',
+      sender_name: 'Andy',
+      content: 'reply',
+      timestamp: '2026-04-20T10:01:00Z',
+      is_from_me: false,
+      is_bot_message: true,
+    });
+    storeMessage({
+      id: 'm3',
+      chat_jid: jid,
+      sender: 'ou_alice',
+      sender_name: 'Alice',
+      content: 'second',
+      timestamp: '2026-04-20T10:02:00Z',
+      is_from_me: false,
+    });
+
+    expect(getLatestUserSenderForChat(jid)).toBe('ou_alice');
+  });
+
+  it('returns null when chat has no user messages', () => {
+    expect(getLatestUserSenderForChat('feishu:oc_empty')).toBeNull();
+  });
+
+  it('ignores is_from_me=1 rows', () => {
+    const jid = 'feishu:oc_selfonly';
+    storeChatMetadata(jid, '2026-04-20T10:00:00Z', 'T');
+    storeMessage({
+      id: 'm1',
+      chat_jid: jid,
+      sender: 'ou_me',
+      sender_name: 'Me',
+      content: 'self',
+      timestamp: '2026-04-20T10:00:00Z',
+      is_from_me: true,
+    });
+    expect(getLatestUserSenderForChat(jid)).toBeNull();
   });
 });
