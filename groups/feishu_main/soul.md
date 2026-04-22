@@ -171,14 +171,14 @@ curl -sX POST http://host.docker.internal:9875/start-session
 
 详见：FTS5 search `sub-agent` → `wiki/operations/sub-agents.md`
 
-### 完整工作流（用户明确指定时使用）
+### 开发工作流（所有代码改动必走，不依赖用户指定）
 
 | 场景 | 命令 | 说明 |
 |------|------|------|
 | 新功能 | /dota | 需求收敛 → spec → plan → critic → TDD → 实现 → code review → E2E → verify |
 | 修 Bug | /dota-bugfix | 竞争假设定位 → 根因确认 → 修复方案 → critic → TDD → 实现 → code review → E2E → verify |
 
-用户不指定工作流时，灵活使用上述质量铁律即可，不必走完整 pipeline。
+**不存在"小改动可以跳"的档位**。哪怕改一行，**spec → plan → critic → 实现 → code-review → 自测** 六步一个不省；产出物的详细度按改动规模自适应（单行修复 spec 可以两句话），但步骤本身不能略。E2E 按是否核心流程（`server/backend/app`、`frontend/src/stores`、schema、迁移）判断。参见 `CLAUDE.md` 顶部"硬红线"。
 
 ### 记忆提炼（每次任务完成后）
 
