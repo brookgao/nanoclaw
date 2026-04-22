@@ -287,9 +287,13 @@ export async function buildContainerArgs(
   // GitHub credentials — propagated to every container so any group can
   // `git push` / `gh pr create` without a per-group setup step. Entrypoint
   // wires the token into git config so HTTPS and SSH-style remotes both work.
-  // Per-group extraEnv below can override (later -e wins in `docker run`).
-  if (GH_TOKEN) {
-    args.push('-e', `GH_TOKEN=${GH_TOKEN}`);
+  // Use docker's `-e KEY` (no value) form: docker reads the value from its
+  // own environment at spawn time, so the token never appears on the docker
+  // CLI argv (visible via `ps`, `/proc/<pid>/cmdline`). The host injects
+  // GH_TOKEN into the docker child's env in the spawn() call below.
+  // Skip when the per-group extraEnv already provides one (extraEnv runs after).
+  if (GH_TOKEN && !group?.containerConfig?.extraEnv?.GH_TOKEN) {
+    args.push('-e', 'GH_TOKEN');
   }
 
   // Per-group custom env vars from registered_groups.container_config.extraEnv
@@ -455,6 +459,9 @@ export async function runContainerAgent(
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Inject GH_TOKEN into the docker CLI's env so the bare `-e GH_TOKEN`
+      // arg in containerArgs picks it up without exposing it on argv.
+      env: GH_TOKEN ? { ...process.env, GH_TOKEN } : process.env,
     });
 
     onProcess(container, containerName);
