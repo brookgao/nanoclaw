@@ -777,6 +777,20 @@ export class FeishuChannel implements Channel {
       // only create when we see the first tool_use. Zero-tool answers (e.g. 2+2=4)
       // fall through to plain sendMessage() below, avoiding a useless card shell.
       const existing = this.cardSessions.get(jid);
+
+      // A duplicate start with the same runId comes from SDK auto-compact
+      // emitting a fresh system/init inside the same agent run. Resetting
+      // would orphan the live Feishu card and wipe tool history, so keep
+      // the session intact and let subsequent tool_use events patch the
+      // existing card.
+      if (existing && existing.runId === event.runId) {
+        logger.debug(
+          { jid, runId: event.runId },
+          '[feishu] ignoring duplicate start for same runId (likely SDK compact)',
+        );
+        return;
+      }
+
       if (existing?.debounceTimer) clearTimeout(existing.debounceTimer);
       if (existing?.heartbeatTimer) clearInterval(existing.heartbeatTimer);
 

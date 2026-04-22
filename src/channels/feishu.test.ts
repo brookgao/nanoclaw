@@ -681,3 +681,123 @@ describe('FeishuChannel.inviteMembers', () => {
     );
   });
 });
+
+describe('FeishuChannel onAgentEvent (card session lifecycle)', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  function makeChannelWithMockedClient() {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    const createSpy = vi.fn().mockResolvedValue({
+      code: 0,
+      data: { message_id: 'om_card_initial' },
+    });
+    const patchSpy = vi.fn().mockResolvedValue({ code: 0 });
+    ch.client = { im: { message: { create: createSpy, patch: patchSpy } } };
+    return { ch, createSpy, patchSpy };
+  }
+
+  function startEvent(runId: string, prompt = 'hi'): any {
+    return {
+      type: 'agent_event',
+      chatJid: 'feishu:oc_t1',
+      runId,
+      seq: 0,
+      timestamp: Date.now(),
+      kind: 'start',
+      payload: { prompt },
+    };
+  }
+
+  function toolUseEvent(
+    runId: string,
+    toolUseId: string,
+    tool = 'Bash',
+    seq = 1,
+  ): any {
+    return {
+      type: 'agent_event',
+      chatJid: 'feishu:oc_t1',
+      runId,
+      seq,
+      timestamp: Date.now(),
+      kind: 'tool_use',
+      payload: { tool, args: { command: 'echo x' }, toolUseId },
+    };
+  }
+
+  it('same runId duplicate start preserves existing card (compact-safe)', async () => {
+    const { ch, createSpy, patchSpy } = makeChannelWithMockedClient();
+    const jid = 'feishu:oc_t1';
+    const RUN = 'run-A';
+
+    await ch.onAgentEvent(jid, startEvent(RUN));
+    await ch.onAgentEvent(jid, toolUseEvent(RUN, 'tu-1'));
+    expect(createSpy).toHaveBeenCalledTimes(1);
+
+    // Capture timer reference before the duplicate start to assert survival
+    const heartbeatBefore = ch.cardSessions.get(jid).heartbeatTimer;
+    expect(heartbeatBefore).toBeDefined();
+
+    // Simulate SDK auto-compact: second start with same runId
+    await ch.onAgentEvent(jid, startEvent(RUN));
+
+    const session = ch.cardSessions.get(jid);
+    expect(session.messageId).toBe('om_card_initial');
+    expect(session.toolEvents).toHaveLength(1);
+    expect(session.runId).toBe(RUN);
+    // Timer must survive the duplicate start (same reference, not recreated)
+    expect(session.heartbeatTimer).toBe(heartbeatBefore);
+
+    // Subsequent tool_use should patch, not re-create
+    await ch.onAgentEvent(jid, toolUseEvent(RUN, 'tu-2', 'Edit', 2));
+    expect(createSpy).toHaveBeenCalledTimes(1);
+
+    // Cleanup to stop the 15s heartbeat interval
+    clearInterval(session.heartbeatTimer);
+  });
+
+  it('different runId triggers full session reset (new user request)', async () => {
+    const { ch } = makeChannelWithMockedClient();
+    const jid = 'feishu:oc_t1';
+
+    await ch.onAgentEvent(jid, startEvent('run-A'));
+    await ch.onAgentEvent(jid, toolUseEvent('run-A', 'tu-1'));
+    const s1 = ch.cardSessions.get(jid);
+    expect(s1.runId).toBe('run-A');
+    expect(s1.toolEvents).toHaveLength(1);
+
+    // New run arrives
+    await ch.onAgentEvent(jid, startEvent('run-B', 'second message'));
+
+    const s2 = ch.cardSessions.get(jid);
+    expect(s2.runId).toBe('run-B');
+    expect(s2.messageId).toBe('');
+    expect(s2.toolEvents).toHaveLength(0);
+    expect(s2.prompt).toBe('second message');
+  });
+
+  it('tool_events accumulate across compact-triggered duplicate starts', async () => {
+    const { ch, createSpy } = makeChannelWithMockedClient();
+    const jid = 'feishu:oc_t1';
+    const RUN = 'run-X';
+
+    await ch.onAgentEvent(jid, startEvent(RUN));
+    await ch.onAgentEvent(jid, toolUseEvent(RUN, 'tu-1', 'Bash', 1));
+    await ch.onAgentEvent(jid, startEvent(RUN)); // compact #1
+    await ch.onAgentEvent(jid, toolUseEvent(RUN, 'tu-2', 'Edit', 3));
+    await ch.onAgentEvent(jid, startEvent(RUN)); // compact #2
+    await ch.onAgentEvent(jid, toolUseEvent(RUN, 'tu-3', 'Read', 5));
+
+    const session = ch.cardSessions.get(jid);
+    expect(session.toolEvents.map((e: any) => e.tool)).toEqual([
+      'Bash',
+      'Edit',
+      'Read',
+    ]);
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+});
