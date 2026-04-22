@@ -10,6 +10,8 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'TZ',
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
 ]);
 
 export const ASSISTANT_NAME =
@@ -52,6 +54,15 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
+
+// GitHub credential — propagated into every container so any group can push
+// branches and open PRs. Read from .env (preferred, keeps secret off the host
+// process env) with process.env as fallback for ad-hoc overrides.
+export const GH_TOKEN =
+  envConfig.GH_TOKEN ??
+  envConfig.GITHUB_TOKEN ??
+  process.env.GH_TOKEN ??
+  process.env.GITHUB_TOKEN;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,

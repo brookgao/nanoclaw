@@ -11,6 +11,7 @@ import {
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   DATA_DIR,
+  GH_TOKEN,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   ONECLI_URL,
@@ -282,6 +283,14 @@ export async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // GitHub credentials — propagated to every container so any group can
+  // `git push` / `gh pr create` without a per-group setup step. Entrypoint
+  // wires the token into git config so HTTPS and SSH-style remotes both work.
+  // Per-group extraEnv below can override (later -e wins in `docker run`).
+  if (GH_TOKEN) {
+    args.push('-e', `GH_TOKEN=${GH_TOKEN}`);
+  }
 
   // Per-group custom env vars from registered_groups.container_config.extraEnv
   // Used for things like GH_TOKEN that the agent's bash subprocess needs.
