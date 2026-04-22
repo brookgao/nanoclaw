@@ -653,13 +653,13 @@ export class FeishuChannel implements Channel {
     if (!this.ownsJid(jid)) {
       throw new Error(`FeishuChannel cannot send to non-feishu jid: ${jid}`);
     }
-    // If a card session is active for this jid, suppress the plain-text message —
-    // the card's final event already handles the text. This prevents duplicate output.
-    const activeCard = this.cardSessions.get(jid);
-    if (activeCard?.messageId) {
+    // When a card session with a messageId is active, the final text will be
+    // patched into the card via onAgentEvent('final'). Sending a plain message
+    // here too would produce a duplicate.
+    if (this.cardSessions.get(jid)?.messageId) {
       logger.debug(
         { jid },
-        '[feishu] suppressed plain-text (card session active)',
+        '[feishu] sendMessage suppressed: card session active',
       );
       return;
     }
