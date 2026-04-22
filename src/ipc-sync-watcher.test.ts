@@ -80,10 +80,7 @@ describe('processSyncRequest', () => {
 
   it('writes error for unknown action', async () => {
     const reqPath = path.join(tmp, 'sync_requests', 'unk.json');
-    fs.writeFileSync(
-      reqPath,
-      JSON.stringify({ action: 'not_a_real_action' }),
-    );
+    fs.writeFileSync(reqPath, JSON.stringify({ action: 'not_a_real_action' }));
 
     await processSyncRequest(reqPath, tmp, 'feishu_main', {
       handleCreateTopicGroup: vi.fn(),

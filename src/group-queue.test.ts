@@ -450,7 +450,12 @@ describe('GroupQueue', () => {
     queue.setProcessMessagesFn(processMessages);
     queue.enqueueMessageCheck('group1@g.us');
     await vi.advanceTimersByTimeAsync(10);
-    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group');
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+    );
 
     const writeFileSync = vi.mocked(fs.default.writeFileSync);
     writeFileSync.mockClear();
@@ -462,7 +467,8 @@ describe('GroupQueue', () => {
     expect(result).toBe(true);
 
     const msgWrite = writeFileSync.mock.calls.find(
-      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
+      (call) =>
+        typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
     );
     expect(msgWrite).toBeDefined();
     const parsed = JSON.parse(msgWrite![1] as string);
@@ -489,7 +495,12 @@ describe('GroupQueue', () => {
     queue.setProcessMessagesFn(processMessages);
     queue.enqueueMessageCheck('group1@g.us');
     await vi.advanceTimersByTimeAsync(10);
-    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group');
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+    );
 
     const writeFileSync = vi.mocked(fs.default.writeFileSync);
     writeFileSync.mockClear();
@@ -498,7 +509,8 @@ describe('GroupQueue', () => {
     expect(result).toBe(true);
 
     const msgWrite = writeFileSync.mock.calls.find(
-      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
+      (call) =>
+        typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
     );
     expect(msgWrite).toBeDefined();
     const parsed = JSON.parse(msgWrite![1] as string);
@@ -524,19 +536,29 @@ describe('GroupQueue', () => {
     queue.setProcessMessagesFn(processMessages);
     queue.enqueueMessageCheck('group1@g.us');
     await vi.advanceTimersByTimeAsync(10);
-    queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group');
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+    );
 
     const writeFileSync = vi.mocked(fs.default.writeFileSync);
     writeFileSync.mockClear();
 
     const oversizedImages: ImageAttachment[] = [
-      { mediaType: 'image/jpeg', base64: 'A'.repeat(9 * 1024 * 1024), sourceKey: 'big' },
+      {
+        mediaType: 'image/jpeg',
+        base64: 'A'.repeat(9 * 1024 * 1024),
+        sourceKey: 'big',
+      },
     ];
     const result = queue.sendMessage('group1@g.us', 'hi', oversizedImages);
     expect(result).toBe(false);
 
     const writes = writeFileSync.mock.calls.filter(
-      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
+      (call) =>
+        typeof call[0] === 'string' && (call[0] as string).endsWith('.tmp'),
     );
     expect(writes).toHaveLength(0);
 

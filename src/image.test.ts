@@ -97,7 +97,9 @@ describe('processImageKeys', () => {
   });
 
   it('unclassified download error → failures[] with reason=download_failed', async () => {
-    const dnsErr = Object.assign(new Error('getaddrinfo ENOTFOUND feishu.cn'), { code: 'ENOTFOUND' });
+    const dnsErr = Object.assign(new Error('getaddrinfo ENOTFOUND feishu.cn'), {
+      code: 'ENOTFOUND',
+    });
     const dl = makeDownloader({ k1: dnsErr });
     const r = await processImageKeys(['k1'], dl, noopLogger);
     expect(r.failures[0].reason).toBe('download_failed');

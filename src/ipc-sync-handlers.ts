@@ -130,10 +130,7 @@ export async function handleCreateTopicGroup(
   } catch (err) {
     const m = err instanceof Error ? err.message : String(err);
     warnings.push(`welcome_failed: ${m}`);
-    logger.warn(
-      { chat_id, err: m },
-      '[sync-ipc] welcome message send failed',
-    );
+    logger.warn({ chat_id, err: m }, '[sync-ipc] welcome message send failed');
   }
 
   return {

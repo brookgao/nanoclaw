@@ -9,7 +9,12 @@ import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import type { CreateTopicGroupDeps } from './ipc-sync-handlers.js';
 import { logger } from './logger.js';
-import { AgentEvent, CreateTopicGroupReq, CreateTopicGroupResp, RegisteredGroup } from './types.js';
+import {
+  AgentEvent,
+  CreateTopicGroupReq,
+  CreateTopicGroupResp,
+  RegisteredGroup,
+} from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
