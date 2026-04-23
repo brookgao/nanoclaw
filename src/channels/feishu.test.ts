@@ -2,6 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { getChannelFactory } from './registry.js';
 import { parseInbound } from './feishu.js';
+import {
+  _initTestDatabase,
+  _closeDatabase,
+  getActiveCards,
+  insertActiveCard,
+} from '../db.js';
 
 // Stub readEnvFile so tests don't read the real ./.env.
 vi.mock('../env.js', () => ({
@@ -686,8 +692,12 @@ describe('FeishuChannel onAgentEvent (card session lifecycle)', () => {
   beforeEach(() => {
     process.env.FEISHU_APP_ID = 'cli_test';
     process.env.FEISHU_APP_SECRET = 'secret_test';
+    _initTestDatabase();
   });
-  afterEach(() => restoreEnv(origEnv));
+  afterEach(() => {
+    _closeDatabase();
+    restoreEnv(origEnv);
+  });
 
   function makeChannelWithMockedClient() {
     const ch = getChannelFactory('feishu')!(makeOpts())! as any;
@@ -799,5 +809,87 @@ describe('FeishuChannel onAgentEvent (card session lifecycle)', () => {
       'Read',
     ]);
     expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('card session DB persistence', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+  afterEach(() => {
+    _closeDatabase();
+  });
+
+  function makeChannel() {
+    process.env.FEISHU_APP_ID = 'test-id';
+    process.env.FEISHU_APP_SECRET = 'test-secret';
+    const factory = getChannelFactory('feishu')!;
+    const ch = factory(makeOpts())!;
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValue({ data: { message_id: 'om_card_1' } });
+    const mockPatch = vi.fn().mockResolvedValue({});
+    (ch as any).client = {
+      im: {
+        message: { create: mockCreate, patch: mockPatch },
+        messageReaction: { create: vi.fn().mockResolvedValue({}) },
+      },
+    };
+    return { ch, mockCreate, mockPatch };
+  }
+
+  it('inserts active_card row when card is created', async () => {
+    const { ch } = makeChannel();
+    const jid = 'feishu:oc_test123';
+
+    await ch.onAgentEvent!(jid, {
+      kind: 'start',
+      runId: 'run-abc',
+      timestamp: Date.now(),
+      payload: { prompt: 'test prompt' },
+    });
+    await ch.onAgentEvent!(jid, {
+      kind: 'tool_use',
+      runId: 'run-abc',
+      timestamp: Date.now(),
+      payload: { tool: 'Bash', args: { command: 'ls' }, toolUseId: 'tu-1' },
+    });
+
+    const cards = getActiveCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0].jid).toBe(jid);
+    expect(cards[0].message_id).toBe('om_card_1');
+    expect(cards[0].run_id).toBe('run-abc');
+
+    restoreEnv(origEnv);
+  });
+
+  it('deletes active_card row on final event', async () => {
+    const { ch } = makeChannel();
+    const jid = 'feishu:oc_test456';
+
+    await ch.onAgentEvent!(jid, {
+      kind: 'start',
+      runId: 'run-def',
+      timestamp: Date.now(),
+      payload: { prompt: 'test' },
+    });
+    await ch.onAgentEvent!(jid, {
+      kind: 'tool_use',
+      runId: 'run-def',
+      timestamp: Date.now(),
+      payload: { tool: 'Read', args: {}, toolUseId: 'tu-2' },
+    });
+    expect(getActiveCards()).toHaveLength(1);
+
+    await ch.onAgentEvent!(jid, {
+      kind: 'final',
+      runId: 'run-def',
+      timestamp: Date.now(),
+      payload: { text: 'done', usage: null },
+    });
+    expect(getActiveCards()).toHaveLength(0);
+
+    restoreEnv(origEnv);
   });
 });

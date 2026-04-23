@@ -5,6 +5,7 @@ import { logger } from '../logger.js';
 import { readEnvFile } from '../env.js';
 import { stripInternalTags } from '../router.js';
 import { TokenUsage, formatTokenFooter } from '../token-footer.js';
+import { insertActiveCard, deleteActiveCard } from '../db.js';
 import {
   processImageKeys,
   type FailReason,
@@ -859,6 +860,7 @@ export class FeishuChannel implements Channel {
       await this.schedulePatch(jid, true);
       if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
       this.cardSessions.delete(jid);
+      deleteActiveCard(jid);
       logger.info({ jid }, '[feishu] card session completed');
     }
   }
@@ -887,6 +889,13 @@ export class FeishuChannel implements Channel {
         return;
       }
       session.messageId = messageId;
+      insertActiveCard({
+        jid,
+        messageId,
+        runId: session.runId,
+        startedAt: session.startedAt,
+        prompt: extractUserMessage(session.prompt),
+      });
       logger.info({ jid, messageId }, '[feishu] card session started');
       // Heartbeat: refresh timer in header every 15s so user knows agent is alive
       // even during long single-tool runs (e.g. pip install, test suite).
