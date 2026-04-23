@@ -3,7 +3,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   _initTestDatabase,
   createTask,
+  deleteActiveCard,
   deleteTask,
+  getActiveCards,
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
@@ -11,6 +13,7 @@ import {
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  insertActiveCard,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -707,5 +710,59 @@ describe('getLatestUserSenderForChat', () => {
       is_from_me: true,
     });
     expect(getLatestUserSenderForChat(jid)).toBeNull();
+  });
+});
+
+describe('active_cards', () => {
+  it('inserts and retrieves an active card', () => {
+    insertActiveCard({
+      jid: 'feishu:oc_abc',
+      messageId: 'om_123',
+      runId: 'run-1',
+      startedAt: 1000,
+      prompt: 'hello',
+    });
+    const cards = getActiveCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toEqual({
+      jid: 'feishu:oc_abc',
+      message_id: 'om_123',
+      run_id: 'run-1',
+      started_at: 1000,
+      prompt: 'hello',
+    });
+  });
+
+  it('deletes an active card by jid', () => {
+    insertActiveCard({
+      jid: 'feishu:oc_abc',
+      messageId: 'om_123',
+      runId: 'run-1',
+      startedAt: 1000,
+    });
+    deleteActiveCard('feishu:oc_abc');
+    expect(getActiveCards()).toHaveLength(0);
+  });
+
+  it('upserts on duplicate jid (INSERT OR REPLACE)', () => {
+    insertActiveCard({
+      jid: 'feishu:oc_abc',
+      messageId: 'om_111',
+      runId: 'run-1',
+      startedAt: 1000,
+    });
+    insertActiveCard({
+      jid: 'feishu:oc_abc',
+      messageId: 'om_222',
+      runId: 'run-2',
+      startedAt: 2000,
+    });
+    const cards = getActiveCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0].message_id).toBe('om_222');
+  });
+
+  it('returns empty array when no active cards', () => {
+    expect(getActiveCards()).toEqual([]);
   });
 });

@@ -83,6 +83,13 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS active_cards (
+      jid        TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      run_id     TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      prompt     TEXT
+    );
   `);
 
   // Wiki full-text search index
@@ -739,6 +746,37 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Active card session tracking (zombie card cleanup) ---
+
+export interface ActiveCardRow {
+  jid: string;
+  message_id: string;
+  run_id: string;
+  started_at: number;
+  prompt: string | null;
+}
+
+export function insertActiveCard(card: {
+  jid: string;
+  messageId: string;
+  runId: string;
+  startedAt: number;
+  prompt?: string;
+}): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO active_cards (jid, message_id, run_id, started_at, prompt)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(card.jid, card.messageId, card.runId, card.startedAt, card.prompt ?? null);
+}
+
+export function deleteActiveCard(jid: string): void {
+  db.prepare('DELETE FROM active_cards WHERE jid = ?').run(jid);
+}
+
+export function getActiveCards(): ActiveCardRow[] {
+  return db.prepare('SELECT * FROM active_cards').all() as ActiveCardRow[];
 }
 
 // --- JSON migration ---
