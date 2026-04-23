@@ -8,6 +8,7 @@ Andy's knowledge base. Read this on startup for a global view.
 - [task-scripts](operations/task-scripts.md) — 定时任务 script 阶段：wakeAgent JSON 契约、何时不用 script
 - [sub-agents](operations/sub-agents.md) — 何时派 Task/TeamCreate 子 agent 避免中间输出污染主 context
 - [autonomy-framework](operations/autonomy-framework.md) — 自治决策边界表 + post-task 经验提炼 + git 风格学习 + 已授权例行动作（start-session / seed 同步）
+- [ai-troubleshooting-5steps](operations/ai-troubleshooting-5steps.md) — 线上排查 5 步法：trace_id → Jaeger → Loki → GlitchTip → 报告（含可执行 SSH 命令）
 
 ## NINE Project
 

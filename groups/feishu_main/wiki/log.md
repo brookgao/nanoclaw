@@ -53,3 +53,4 @@ Append-only record of wiki operations.
 [2026-04-17] update: soul.md — 加主动 compact 触发器段 + 子 agent 铁律（Task A A1/A2）
 [2026-04-20] update: wiki/operations/autonomy-framework.md — 加"已授权的例行动作"段：start-session 自愈 + seed 源码改动的配对生效（修阿飞 /nine-verify-e2e 卡 no-session 问题）
 [2026-04-20] update: groups/feishu_langgraph-fix/CLAUDE.md — 健康检查小节加 /start-session 自愈流程 + 修示例 session 名为 dev-claude-andy
+[2026-04-23] create: wiki/operations/ai-troubleshooting-5steps.md — AI 排查 5 步法：trace_id 串联 Jaeger/Loki/GlitchTip，含 SSH 可执行命令、proxy 陷阱、环境差异表
