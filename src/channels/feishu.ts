@@ -5,7 +5,11 @@ import { logger } from '../logger.js';
 import { readEnvFile } from '../env.js';
 import { stripInternalTags } from '../router.js';
 import { TokenUsage, formatTokenFooter } from '../token-footer.js';
-import { insertActiveCard, deleteActiveCard } from '../db.js';
+import {
+  insertActiveCard,
+  deleteActiveCard,
+  getActiveCards,
+} from '../db.js';
 import {
   processImageKeys,
   type FailReason,
@@ -214,6 +218,51 @@ function buildCard(session: CardSession): object {
       title: { tag: 'plain_text', content: '阿飞' },
       subtitle: { tag: 'plain_text', content: subtitle },
       template,
+    },
+    body: { elements },
+  };
+}
+
+function buildInterruptedCard(session: {
+  prompt: string;
+  startedAt: number;
+  toolEvents: ToolEvent[];
+}): object {
+  const elapsedMs = Date.now() - session.startedAt;
+  const elapsed =
+    elapsedMs >= 60000
+      ? `${(elapsedMs / 60000).toFixed(1)}min`
+      : `${(elapsedMs / 1000).toFixed(1)}s`;
+  const promptPreview = extractUserMessage(session.prompt);
+
+  const elements: object[] = [
+    { tag: 'markdown', content: `**任务**\n> ${promptPreview}` },
+    { tag: 'hr' },
+  ];
+
+  const tools = session.toolEvents;
+  if (tools.length > 0) {
+    elements.push({
+      tag: 'markdown',
+      content: `**工具调用** (共 ${tools.length} 个)`,
+    });
+    for (const ev of tools.slice(-MAX_PANEL_TOOLS)) {
+      elements.push(buildToolPanel(ev));
+    }
+  }
+
+  elements.push({ tag: 'hr' });
+  elements.push({
+    tag: 'markdown',
+    content: '服务重启，请重新发送消息',
+  });
+
+  return {
+    schema: '2.0',
+    header: {
+      title: { tag: 'plain_text', content: '阿飞' },
+      subtitle: { tag: 'plain_text', content: `⚠️ 已中断 (${elapsed})` },
+      template: 'red',
     },
     body: { elements },
   };
@@ -922,7 +971,62 @@ export class FeishuChannel implements Channel {
     return jid.startsWith(JID_PREFIX);
   }
 
+  async cleanupStaleCards(): Promise<void> {
+    const staleCards = getActiveCards();
+    if (staleCards.length === 0) return;
+
+    for (const card of staleCards) {
+      const interruptedCard = buildInterruptedCard({
+        prompt: card.prompt ?? '',
+        startedAt: card.started_at,
+        toolEvents: [],
+      });
+      try {
+        await this.client.im.message.patch({
+          path: { message_id: card.message_id },
+          data: { content: JSON.stringify(interruptedCard) },
+        });
+      } catch (err) {
+        logger.warn(
+          {
+            err: (err as Error).message,
+            jid: card.jid,
+            messageId: card.message_id,
+          },
+          '[feishu] stale card patch failed (message may have been deleted)',
+        );
+      }
+      deleteActiveCard(card.jid);
+    }
+
+    logger.info(
+      { count: staleCards.length },
+      '[feishu] cleaned up stale cards from previous process',
+    );
+  }
+
   async disconnect(): Promise<void> {
+    for (const [jid, session] of this.cardSessions) {
+      if (session.debounceTimer) clearTimeout(session.debounceTimer);
+      if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
+      if (session.messageId) {
+        const card = buildInterruptedCard(session);
+        try {
+          await this.client.im.message.patch({
+            path: { message_id: session.messageId },
+            data: { content: JSON.stringify(card) },
+          });
+        } catch (err) {
+          logger.warn(
+            { err: (err as Error).message, jid },
+            '[feishu] interrupted card patch failed on shutdown',
+          );
+        }
+        deleteActiveCard(jid);
+      }
+    }
+    this.cardSessions.clear();
+
     try {
       (this.ws as any).close?.();
     } catch {

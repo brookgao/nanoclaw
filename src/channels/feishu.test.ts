@@ -892,4 +892,85 @@ describe('card session DB persistence', () => {
 
     restoreEnv(origEnv);
   });
+
+  it('patches active cards as interrupted on disconnect', async () => {
+    const { ch, mockPatch } = makeChannel();
+    const jid = 'feishu:oc_test789';
+
+    await ch.onAgentEvent!(jid, {
+      kind: 'start',
+      runId: 'run-ghi',
+      timestamp: Date.now(),
+      payload: { prompt: 'test prompt' },
+    });
+    await ch.onAgentEvent!(jid, {
+      kind: 'tool_use',
+      runId: 'run-ghi',
+      timestamp: Date.now(),
+      payload: { tool: 'Bash', args: { command: 'echo hi' }, toolUseId: 'tu-3' },
+    });
+    expect(getActiveCards()).toHaveLength(1);
+
+    await ch.disconnect();
+
+    const patchCalls = mockPatch.mock.calls;
+    const lastPatch = patchCalls[patchCalls.length - 1];
+    const cardContent = JSON.parse(lastPatch[0].data.content);
+    expect(cardContent.header.template).toBe('red');
+    expect(cardContent.header.subtitle.content).toContain('已中断');
+
+    expect(getActiveCards()).toHaveLength(0);
+
+    restoreEnv(origEnv);
+  });
+
+  it('cleanupStaleCards patches and deletes leftover DB rows', async () => {
+    const { ch, mockPatch } = makeChannel();
+
+    insertActiveCard({
+      jid: 'feishu:oc_stale1',
+      messageId: 'om_stale_1',
+      runId: 'run-old-1',
+      startedAt: Date.now() - 60000,
+      prompt: 'old task 1',
+    });
+    insertActiveCard({
+      jid: 'feishu:oc_stale2',
+      messageId: 'om_stale_2',
+      runId: 'run-old-2',
+      startedAt: Date.now() - 120000,
+      prompt: 'old task 2',
+    });
+
+    await (ch as any).cleanupStaleCards();
+
+    expect(mockPatch).toHaveBeenCalledTimes(2);
+    for (const call of mockPatch.mock.calls) {
+      const content = JSON.parse(call[0].data.content);
+      expect(content.header.template).toBe('red');
+      expect(content.header.subtitle.content).toContain('已中断');
+    }
+    expect(getActiveCards()).toHaveLength(0);
+
+    restoreEnv(origEnv);
+  });
+
+  it('cleanupStaleCards tolerates patch failures', async () => {
+    const { ch } = makeChannel();
+    (ch as any).client.im.message.patch = vi
+      .fn()
+      .mockRejectedValue(new Error('message deleted'));
+
+    insertActiveCard({
+      jid: 'feishu:oc_gone',
+      messageId: 'om_gone',
+      runId: 'run-gone',
+      startedAt: Date.now() - 60000,
+    });
+
+    await (ch as any).cleanupStaleCards();
+    expect(getActiveCards()).toHaveLength(0);
+
+    restoreEnv(origEnv);
+  });
 });
