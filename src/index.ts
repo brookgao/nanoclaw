@@ -748,6 +748,10 @@ async function main(): Promise<void> {
     (c): c is FeishuChannel => c.name === 'feishu',
   );
 
+  if (feishuChannel) {
+    await feishuChannel.cleanupStaleCards();
+  }
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
