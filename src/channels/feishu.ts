@@ -5,11 +5,7 @@ import { logger } from '../logger.js';
 import { readEnvFile } from '../env.js';
 import { stripInternalTags } from '../router.js';
 import { TokenUsage, formatTokenFooter } from '../token-footer.js';
-import {
-  insertActiveCard,
-  deleteActiveCard,
-  getActiveCards,
-} from '../db.js';
+import { insertActiveCard, deleteActiveCard, getActiveCards } from '../db.js';
 import {
   processImageKeys,
   type FailReason,
@@ -41,13 +37,11 @@ interface CardSession {
   pendingPatch: boolean;
 }
 
-// Format a tool entry line for the card
-function formatToolEntry(ev: ToolEvent): string {
+function _formatToolEntry(ev: ToolEvent): string {
   const icon =
     ev.status === 'running' ? '⏳' : ev.status === 'done' ? '✓' : '✗';
   let detail = '';
   if (ev.args) {
-    // Show key arg per tool type
     const cmd = ev.args.command ?? ev.args.cmd;
     const file =
       ev.args.file_path ?? ev.args.path ?? ev.args.pattern ?? ev.args.query;

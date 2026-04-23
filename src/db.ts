@@ -768,7 +768,13 @@ export function insertActiveCard(card: {
   db.prepare(
     `INSERT OR REPLACE INTO active_cards (jid, message_id, run_id, started_at, prompt)
      VALUES (?, ?, ?, ?, ?)`,
-  ).run(card.jid, card.messageId, card.runId, card.startedAt, card.prompt ?? null);
+  ).run(
+    card.jid,
+    card.messageId,
+    card.runId,
+    card.startedAt,
+    card.prompt ?? null,
+  );
 }
 
 export function deleteActiveCard(jid: string): void {

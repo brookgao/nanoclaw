@@ -740,7 +740,7 @@ describe('FeishuChannel onAgentEvent (card session lifecycle)', () => {
   }
 
   it('same runId duplicate start preserves existing card (compact-safe)', async () => {
-    const { ch, createSpy, patchSpy } = makeChannelWithMockedClient();
+    const { ch, createSpy } = makeChannelWithMockedClient();
     const jid = 'feishu:oc_t1';
     const RUN = 'run-A';
 
@@ -843,14 +843,20 @@ describe('card session DB persistence', () => {
     const jid = 'feishu:oc_test123';
 
     await ch.onAgentEvent!(jid, {
+      type: 'agent_event',
+      chatJid: jid,
       kind: 'start',
       runId: 'run-abc',
+      seq: 0,
       timestamp: Date.now(),
       payload: { prompt: 'test prompt' },
     });
     await ch.onAgentEvent!(jid, {
+      type: 'agent_event',
+      chatJid: jid,
       kind: 'tool_use',
       runId: 'run-abc',
+      seq: 1,
       timestamp: Date.now(),
       payload: { tool: 'Bash', args: { command: 'ls' }, toolUseId: 'tu-1' },
     });
@@ -869,22 +875,31 @@ describe('card session DB persistence', () => {
     const jid = 'feishu:oc_test456';
 
     await ch.onAgentEvent!(jid, {
+      type: 'agent_event',
+      chatJid: jid,
       kind: 'start',
       runId: 'run-def',
+      seq: 0,
       timestamp: Date.now(),
       payload: { prompt: 'test' },
     });
     await ch.onAgentEvent!(jid, {
+      type: 'agent_event',
+      chatJid: jid,
       kind: 'tool_use',
       runId: 'run-def',
+      seq: 1,
       timestamp: Date.now(),
       payload: { tool: 'Read', args: {}, toolUseId: 'tu-2' },
     });
     expect(getActiveCards()).toHaveLength(1);
 
     await ch.onAgentEvent!(jid, {
+      type: 'agent_event',
+      chatJid: jid,
       kind: 'final',
       runId: 'run-def',
+      seq: 2,
       timestamp: Date.now(),
       payload: { text: 'done', usage: null },
     });
@@ -898,16 +913,26 @@ describe('card session DB persistence', () => {
     const jid = 'feishu:oc_test789';
 
     await ch.onAgentEvent!(jid, {
+      type: 'agent_event',
+      chatJid: jid,
       kind: 'start',
       runId: 'run-ghi',
+      seq: 0,
       timestamp: Date.now(),
       payload: { prompt: 'test prompt' },
     });
     await ch.onAgentEvent!(jid, {
+      type: 'agent_event',
+      chatJid: jid,
       kind: 'tool_use',
       runId: 'run-ghi',
+      seq: 1,
       timestamp: Date.now(),
-      payload: { tool: 'Bash', args: { command: 'echo hi' }, toolUseId: 'tu-3' },
+      payload: {
+        tool: 'Bash',
+        args: { command: 'echo hi' },
+        toolUseId: 'tu-3',
+      },
     });
     expect(getActiveCards()).toHaveLength(1);
 
