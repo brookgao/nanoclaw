@@ -23,6 +23,7 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { extractLearnings, formatLearningEntry } from './learning-extractor.js';
 
 type ImageAttachment = {
   mediaType: 'image/jpeg';
@@ -251,6 +252,32 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       fs.writeFileSync(filePath, markdown);
 
       log(`Archived conversation to ${filePath}`);
+
+      // Extract learnings from the conversation and append to session-learnings.md
+      const learnings = extractLearnings(messages);
+      if (learnings.length > 0) {
+        const memoryDir = '/workspace/group/memory';
+        fs.mkdirSync(memoryDir, { recursive: true });
+        const learningsFile = path.join(memoryDir, 'session-learnings.md');
+
+        if (!fs.existsSync(learningsFile)) {
+          fs.writeFileSync(learningsFile, '# Session Learnings\n\nPost-compact extraction. When 10+ unpromoted entries accumulate, promote to wiki.\n\n');
+        }
+
+        const entries = learnings.map(l => formatLearningEntry(l, filename));
+        fs.appendFileSync(learningsFile, entries.join('\n') + '\n');
+        log(`Extracted ${learnings.length} learnings to session-learnings.md`);
+
+        const existingContent = fs.readFileSync(learningsFile, 'utf-8');
+        const unpromotedCount = existingContent.split('\n')
+          .filter(line => /^\[\d{4}-\d{2}-\d{2}\]/.test(line) && !line.startsWith('[promoted]'))
+          .length;
+        if (unpromotedCount >= 10) {
+          const flagPath = path.join(memoryDir, '.needs-promotion');
+          fs.writeFileSync(flagPath, String(unpromotedCount));
+          log(`Promotion threshold reached (${unpromotedCount} entries), wrote .needs-promotion flag`);
+        }
+      }
     } catch (err) {
       log(
         `Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`,
@@ -274,12 +301,12 @@ function generateFallbackName(): string {
   return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
 }
 
-interface ParsedMessage {
+export interface ParsedMessage {
   role: 'user' | 'assistant';
   content: string;
 }
 
-function parseTranscript(content: string): ParsedMessage[] {
+export function parseTranscript(content: string): ParsedMessage[] {
   const messages: ParsedMessage[] = [];
 
   for (const line of content.split('\n')) {

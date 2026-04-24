@@ -1,9 +1,6 @@
 // container/agent-runner/src/learning-extractor.ts
 
-interface ParsedMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
+import type { ParsedMessage } from './index.js';
 
 const DECISION_KEYWORDS = [
   '结论', '决定', '教训', '发现', '原因是', '解决方案',
