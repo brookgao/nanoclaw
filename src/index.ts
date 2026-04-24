@@ -184,6 +184,18 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     }
   }
 
+  // Ensure memory directory and session-learnings.md exist for knowledge pipeline
+  const memoryDir = path.join(groupDir, 'memory');
+  const learningsFile = path.join(memoryDir, 'session-learnings.md');
+  if (!fs.existsSync(learningsFile)) {
+    fs.mkdirSync(memoryDir, { recursive: true });
+    fs.writeFileSync(
+      learningsFile,
+      '# Session Learnings\n\nPost-compact extraction. When 10+ unpromoted entries accumulate, promote to wiki.\n\n',
+    );
+    logger.info({ folder: group.folder }, 'Created session-learnings.md template');
+  }
+
   // Ensure a corresponding OneCLI agent exists (best-effort, non-blocking)
   ensureOneCLIAgent(jid, group);
 
