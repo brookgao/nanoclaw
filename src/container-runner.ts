@@ -145,6 +145,16 @@ function buildVolumeMounts(
     }
   }
 
+  // Universal global wiki mount — all groups get read-only access to cross-group knowledge
+  const globalWikiDir = path.join(GROUPS_DIR, 'global', 'wiki');
+  if (fs.existsSync(globalWikiDir)) {
+    mounts.push({
+      hostPath: globalWikiDir,
+      containerPath: '/workspace/shared-wiki',
+      readonly: true,
+    });
+  }
+
   // Per-group Claude sessions directory (isolated from other groups)
   // Each group gets their own .claude/ to prevent cross-group session access
   const groupSessionsDir = path.join(

@@ -243,3 +243,20 @@ Read and write `/workspace/global/CLAUDE.md` for facts that apply to all groups.
 - **Scheduled task scripts**（wakeAgent 契约、脚本写法）→ FTS5 search `task-scripts` or read `wiki/operations/task-scripts.md`
 - **Session/context 管理**（context rot、五条岔路）→ FTS5 search `session-management` or read `wiki/learnings/nanoclaw-session-management.md`
 - **线上排查 5 步法**（trace_id → Jaeger → Loki → GlitchTip → 报告）→ FTS5 search `troubleshooting` or read `wiki/operations/ai-troubleshooting-5steps.md`；完整命令清单见 `/workspace/extra/vibe-coding/nine/docs/kb/observability-debug.md`
+
+## 知识整理
+
+当用户说"整理知识"、"promote learnings"、或"知识提炼"时，执行 `/knowledge-distiller` skill。
+
+如果 `/workspace/shared-wiki` 是只读的，回复用户：
+> 当前环境只读，无法写入共享 wiki。知识整理需要通过系统自动触发（每日凌晨 2 点或积累满 10 条时自动运行）。
+
+### 搜索共享知识库
+
+在回答问题前，可以搜索共享 wiki 了解其他群的历史经验：
+
+```bash
+sqlite3 /workspace/shared-wiki/wiki.db "SELECT path, title, snippet(wiki_fts, 3, '>>>', '<<<', '...', 30) FROM wiki_fts WHERE wiki_fts MATCH '<搜索词>' LIMIT 5;"
+```
+
+如果 wiki.db 不存在，直接用 `grep -ri` 搜索 `/workspace/shared-wiki/` 目录。

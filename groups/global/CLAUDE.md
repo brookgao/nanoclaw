@@ -181,3 +181,20 @@ If a user wants tasks running more than ~2x daily and a script can't reduce agen
 - Suggest restructuring with a script that checks the condition first
 - If the user needs an LLM to evaluate data, suggest using an API key with direct Anthropic API calls inside the script
 - Help the user find the minimum viable frequency
+
+## 知识整理
+
+当用户说"整理知识"、"promote learnings"、或"知识提炼"时，执行 `/knowledge-distiller` skill。
+
+如果 `/workspace/shared-wiki` 是只读的，回复用户：
+> 当前环境只读，无法写入共享 wiki。知识整理需要通过系统自动触发（每日凌晨 2 点或积累满 10 条时自动运行）。
+
+### 搜索共享知识库
+
+在回答问题前，可以搜索共享 wiki 了解其他群的历史经验：
+
+```bash
+sqlite3 /workspace/shared-wiki/wiki.db "SELECT path, title, snippet(wiki_fts, 3, '>>>', '<<<', '...', 30) FROM wiki_fts WHERE wiki_fts MATCH '<搜索词>' LIMIT 5;"
+```
+
+如果 wiki.db 不存在，直接用 `grep -ri` 搜索 `/workspace/shared-wiki/` 目录。
