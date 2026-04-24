@@ -69,6 +69,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { appendTokenFooter } from './token-footer.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { shouldPromote, spawnDistiller } from './knowledge-promoter.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -193,7 +194,10 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       learningsFile,
       '# Session Learnings\n\nPost-compact extraction. When 10+ unpromoted entries accumulate, promote to wiki.\n\n',
     );
-    logger.info({ folder: group.folder }, 'Created session-learnings.md template');
+    logger.info(
+      { folder: group.folder },
+      'Created session-learnings.md template',
+    );
   }
 
   // Ensure a corresponding OneCLI agent exists (best-effort, non-blocking)
@@ -497,6 +501,14 @@ async function runAgent(
         'Container agent error',
       );
       return 'error';
+    }
+
+    // Check for knowledge promotion threshold after successful container exit
+    const memoryDir = path.join(resolveGroupFolderPath(group.folder), 'memory');
+    if (shouldPromote(memoryDir)) {
+      spawnDistiller(group, chatJid).catch(err =>
+        logger.warn({ group: group.name, err }, 'Background distiller failed')
+      );
     }
 
     return 'success';
