@@ -21,6 +21,7 @@ groups/feishu_main/*
 !groups/global/CLAUDE.md
 !groups/feishu_main/CLAUDE.md
 !groups/feishu_main/wiki/
+!groups/global/wiki/
 !groups/feishu_main/memory/
 
 # Secrets
