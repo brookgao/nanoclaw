@@ -74,6 +74,15 @@ export async function handleCreateTopicGroup(
       trigger: `@${ASSISTANT_NAME}`,
       added_at: new Date().toISOString(),
       requiresTrigger: false,
+      containerConfig: {
+        additionalMounts: [
+          {
+            hostPath: '~/Desktop/vibe-coding',
+            containerPath: 'vibe-coding',
+            readonly: false,
+          },
+        ],
+      },
     };
     deps.setRegisteredGroup(jid, group);
     deps.onGroupRegistered(jid, group);
@@ -97,9 +106,9 @@ export async function handleCreateTopicGroup(
   }
 
   // Steps d+e — non-fatal
+  const groupDir = path.join(deps.projectRoot, 'groups', req.folder);
   let folder_initialized = false;
   try {
-    const groupDir = path.join(deps.projectRoot, 'groups', req.folder);
     fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
     const tmplPath = path.join(
       deps.projectRoot,
@@ -120,6 +129,33 @@ export async function handleCreateTopicGroup(
     logger.warn(
       { folder: req.folder, err: m },
       '[sync-ipc] folder init failed',
+    );
+  }
+
+  // Step d2 — Copy .mcp.json template (non-fatal, separate from folder init)
+  // New feishu topic groups need feishu-blocks + mem0 MCP servers registered
+  // so the agent can read Feishu docs via OAuth instead of WebFetch.
+  try {
+    const mcpTmpl = path.join(
+      deps.projectRoot,
+      'groups',
+      'global',
+      '.mcp.json',
+    );
+    const mcpDest = path.join(groupDir, '.mcp.json');
+    if (!fs.existsSync(mcpDest) && fs.existsSync(mcpTmpl)) {
+      const agentId = 'andy-' + req.folder.replace(/^feishu_/, '');
+      const rendered = fs
+        .readFileSync(mcpTmpl, 'utf-8')
+        .replace(/__MEM0_AGENT_ID__/g, agentId);
+      fs.writeFileSync(mcpDest, rendered);
+    }
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    warnings.push(`mcp_json_failed: ${m}`);
+    logger.warn(
+      { folder: req.folder, err: m },
+      '[sync-ipc] mcp.json template copy failed',
     );
   }
 

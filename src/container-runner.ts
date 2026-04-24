@@ -270,6 +270,21 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
+  // feishu_dm: bind host ~/.ssh so the agent can SSH to dev servers.
+  // Hardcoded rather than via additionalMounts because mount-security blocks
+  // .ssh / id_rsa / id_ed25519 / private_key patterns for all groups by default;
+  // loosening that would affect every group. Keep this scoped to feishu_dm.
+  if (group.folder === 'feishu_dm') {
+    const hostSshDir = path.join(process.env.HOME ?? '/Users/admin', '.ssh');
+    if (fs.existsSync(hostSshDir)) {
+      mounts.push({
+        hostPath: hostSshDir,
+        containerPath: '/home/node/.ssh',
+        readonly: false,
+      });
+    }
+  }
+
   return mounts;
 }
 
@@ -283,6 +298,9 @@ export async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Pin Claude model to Opus 4.6 (prevents auto-upgrade to 4.7+)
+  args.push('-e', 'CLAUDE_MODEL=claude-opus-4-6');
 
   // GitHub credentials — propagated to every container so any group can
   // `git push` / `gh pr create` without a per-group setup step. Entrypoint
@@ -332,11 +350,12 @@ export async function buildContainerArgs(
       );
       if (fs.existsSync(refreshScript)) {
         const { execSync } = await import('node:child_process');
-        const token = execSync(refreshScript, {
+        const result = execSync(refreshScript, {
           encoding: 'utf8',
-          timeout: 10000,
-          stdio: ['ignore', 'pipe', 'ignore'],
-        }).trim();
+          timeout: 25000,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const token = result.trim();
         if (token) {
           args.push('-e', `FEISHU_USER_ACCESS_TOKEN=${token}`);
           logger.debug(
@@ -346,8 +365,9 @@ export async function buildContainerArgs(
         }
       }
     } catch (err) {
-      logger.warn(
-        { group: group.folder, err: (err as Error).message },
+      const stderr = (err as any).stderr ?? '';
+      logger.error(
+        { group: group.folder, err: (err as Error).message, stderr },
         '[feishu] failed to refresh user access token (will fall back to tenant token)',
       );
     }

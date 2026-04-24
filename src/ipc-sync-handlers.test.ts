@@ -12,6 +12,14 @@ function makeDeps(overrides: any = {}) {
     path.join(tmpRoot, 'groups', 'global', 'CLAUDE.md'),
     '# Andy\n\nGlobal default.\n',
   );
+  fs.writeFileSync(
+    path.join(tmpRoot, 'groups', 'global', '.mcp.json'),
+    JSON.stringify({
+      mcpServers: {
+        mem0: { env: { MEM0_AGENT_ID: '__MEM0_AGENT_ID__' } },
+      },
+    }),
+  );
 
   return {
     tmpRoot,
@@ -86,6 +94,51 @@ describe('handleCreateTopicGroup', () => {
     expect(md).toContain('Global default.');
     expect(md).toContain('## Topic');
     expect(md).toContain('讨论 pipeline 建设');
+  });
+
+  it('happy path: writes .mcp.json with folder-derived MEM0_AGENT_ID', async () => {
+    const { deps, tmpRoot } = setup();
+
+    await handleCreateTopicGroup(
+      {
+        name: 'Pipeline 建设',
+        folder: 'feishu_pipeline',
+        topic_description: 'x',
+      },
+      'feishu_main',
+      deps,
+    );
+
+    const mcpPath = path.join(
+      tmpRoot,
+      'groups',
+      'feishu_pipeline',
+      '.mcp.json',
+    );
+    expect(fs.existsSync(mcpPath)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+    expect(parsed.mcpServers.mem0.env.MEM0_AGENT_ID).toBe('andy-pipeline');
+  });
+
+  it('does NOT overwrite existing .mcp.json', async () => {
+    const { deps, tmpRoot } = setup();
+    fs.mkdirSync(path.join(tmpRoot, 'groups', 'feishu_x'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRoot, 'groups', 'feishu_x', '.mcp.json'),
+      '{"user":"custom"}',
+    );
+
+    await handleCreateTopicGroup(
+      { name: 'x', folder: 'feishu_x', topic_description: 'y' },
+      'feishu_main',
+      deps,
+    );
+
+    const content = fs.readFileSync(
+      path.join(tmpRoot, 'groups', 'feishu_x', '.mcp.json'),
+      'utf-8',
+    );
+    expect(content).toBe('{"user":"custom"}');
   });
 
   it('chat.create failure: throws, no side effects', async () => {

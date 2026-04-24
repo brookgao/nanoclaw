@@ -45,6 +45,7 @@ Four types of skills exist in NanoClaw. See [CONTRIBUTING.md](CONTRIBUTING.md) f
 | `/init-onecli` | Install OneCLI Agent Vault and migrate `.env` credentials to it |
 | `/qodo-pr-resolver` | Fetch and fix Qodo PR review issues interactively or in batch |
 | `/get-qodo-rules` | Load org- and repo-level coding rules from Qodo before code tasks |
+| `/switch-account` | Replace the Claude Max OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`) and restart nanoclaw |
 
 ## Contributing
 

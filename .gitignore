@@ -41,3 +41,6 @@ groups/feishu_main/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Worktrees
+.worktrees/

@@ -255,7 +255,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const { xml: prompt, images } = formatMessages(missedMessages, TIMEZONE);
+  const { xml: rawPrompt, images } = formatMessages(missedMessages, TIMEZONE);
+
+  // If the last user message signals retry intent (e.g. "授权过了，再试"),
+  // prepend a hint so Claude doesn't zero-tool-run and replay a cached error.
+  const RETRY_INTENT =
+    /再试|重试|授权[过了完]?|retry|再读|再看|再来一次|重新读|再调/i;
+  const lastMsg = missedMessages[missedMessages.length - 1];
+  const prompt =
+    !lastMsg.is_from_me && RETRY_INTENT.test(lastMsg.content)
+      ? `<system_hint>用户表示上一轮的错误条件已改变。如果你上一轮因权限/403/鉴权问题放弃了某个工具调用，本轮你必须重新调用该工具，不能复读上轮结论。</system_hint>\n${rawPrompt}`
+      : rawPrompt;
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
