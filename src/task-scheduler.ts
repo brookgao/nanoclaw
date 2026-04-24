@@ -1,8 +1,10 @@
 import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
+import path from 'path';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { hasUnpromotedEntries, spawnDistiller } from './knowledge-promoter.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -240,6 +242,34 @@ async function runTask(
   updateTaskAfterRun(task.id, nextRun, resultSummary);
 }
 
+let lastPromotionDate = '';
+
+async function runDailyKnowledgePromotion(deps: SchedulerDependencies): Promise<void> {
+  const today = new Date().toISOString().split('T')[0];
+  if (today === lastPromotionDate) return;
+
+  const hour = new Date().getHours();
+  if (hour !== 2) return;
+
+  lastPromotionDate = today;
+  logger.info('Running daily knowledge promotion');
+
+  const groups = deps.registeredGroups();
+  for (const [chatJid, group] of Object.entries(groups)) {
+    const learningsPath = path.join(
+      resolveGroupFolderPath(group.folder),
+      'memory',
+      'session-learnings.md',
+    );
+    if (hasUnpromotedEntries(learningsPath)) {
+      logger.info({ group: group.folder }, 'Daily promotion: group has unpromoted entries');
+      spawnDistiller(group, chatJid).catch(err =>
+        logger.warn({ group: group.folder, err }, 'Daily promotion failed'),
+      );
+    }
+  }
+}
+
 let schedulerRunning = false;
 
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
@@ -252,6 +282,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const loop = async () => {
     try {
+      await runDailyKnowledgePromotion(deps);
       const dueTasks = getDueTasks();
       if (dueTasks.length > 0) {
         logger.info({ count: dueTasks.length }, 'Found due tasks');
