@@ -81,13 +81,20 @@ interface SDKUserMessage {
   session_id: string;
 }
 
-let IPC_INPUT_DIR = '/workspace/ipc/input';
+const IPC_BASE = process.env.NANOCLAW_IPC_DIR || '/workspace/ipc';
+let IPC_INPUT_DIR = path.join(IPC_BASE, 'input');
 export function _setIpcInputDir(dir: string): void {
   IPC_INPUT_DIR = dir;
 }
-const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
+function ipcCloseSentinel(): string {
+  return path.join(IPC_INPUT_DIR, '_close');
+}
 const IPC_POLL_MS = 500;
-const IPC_EVENTS_DIR = '/workspace/ipc/events';
+const IPC_EVENTS_DIR = path.join(IPC_BASE, 'events');
+
+const GROUP_DIR = process.env.NANOCLAW_GROUP_DIR || '/workspace/group';
+const GLOBAL_DIR = process.env.NANOCLAW_GLOBAL_DIR || '/workspace/global';
+const EXTRA_BASE = process.env.NANOCLAW_EXTRA_DIRS || '/workspace/extra';
 
 // Write an agent event file atomically (tmp + rename).
 function writeAgentEvent(event: object): void {
@@ -214,7 +221,7 @@ function getSessionSummary(
 /**
  * Archive the full transcript to conversations/ before compaction.
  */
-function createPreCompactHook(assistantName?: string): HookCallback {
+function createPreCompactHook(assistantName: string | undefined, groupDir: string): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preCompact = input as PreCompactHookInput;
     const transcriptPath = preCompact.transcript_path;
@@ -237,7 +244,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const summary = getSessionSummary(sessionId, transcriptPath);
       const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
-      const conversationsDir = '/workspace/group/conversations';
+      const conversationsDir = path.join(groupDir, 'conversations');
       fs.mkdirSync(conversationsDir, { recursive: true });
 
       const date = new Date().toISOString().split('T')[0];
@@ -256,7 +263,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       // Extract learnings from the conversation and append to session-learnings.md
       const learnings = extractLearnings(messages);
       if (learnings.length > 0) {
-        const memoryDir = '/workspace/group/memory';
+        const memoryDir = path.join(groupDir, 'memory');
         fs.mkdirSync(memoryDir, { recursive: true });
         const learningsFile = path.join(memoryDir, 'session-learnings.md');
 
@@ -374,9 +381,9 @@ function formatTranscriptMarkdown(
  * Check for _close sentinel.
  */
 function shouldClose(): boolean {
-  if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
+  if (fs.existsSync(ipcCloseSentinel())) {
     try {
-      fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
+      fs.unlinkSync(ipcCloseSentinel());
     } catch {
       /* ignore */
     }
@@ -520,21 +527,23 @@ async function runQuery(
   let resultCount = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+  const globalClaudeMdPath = path.join(GLOBAL_DIR, 'CLAUDE.md');
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
 
-  // Discover additional directories mounted at /workspace/extra/*
+  // Discover additional directories mounted at EXTRA_BASE/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
+  const extraDirsList = EXTRA_BASE.includes(':') ? EXTRA_BASE.split(':') : [EXTRA_BASE];
   const extraDirs: string[] = [];
-  const extraBase = '/workspace/extra';
-  if (fs.existsSync(extraBase)) {
-    for (const entry of fs.readdirSync(extraBase)) {
-      const fullPath = path.join(extraBase, entry);
-      if (fs.statSync(fullPath).isDirectory()) {
-        extraDirs.push(fullPath);
+  for (const extraBase of extraDirsList) {
+    if (fs.existsSync(extraBase)) {
+      for (const entry of fs.readdirSync(extraBase)) {
+        const fullPath = path.join(extraBase, entry);
+        if (fs.statSync(fullPath).isDirectory()) {
+          extraDirs.push(fullPath);
+        }
       }
     }
   }
@@ -545,7 +554,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      cwd: '/workspace/group',
+      cwd: GROUP_DIR,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -594,7 +603,7 @@ async function runQuery(
       },
       hooks: {
         PreCompact: [
-          { hooks: [createPreCompactHook(containerInput.assistantName)] },
+          { hooks: [createPreCompactHook(containerInput.assistantName, GROUP_DIR)] },
         ],
       },
     },
@@ -785,11 +794,6 @@ async function main(): Promise<void> {
   try {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
-    try {
-      fs.unlinkSync('/tmp/input.json');
-    } catch {
-      /* may not exist */
-    }
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({
@@ -816,7 +820,7 @@ async function main(): Promise<void> {
 
   // Clean up stale _close sentinel from previous container runs
   try {
-    fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
+    fs.unlinkSync(ipcCloseSentinel());
   } catch {
     /* ignore */
   }
