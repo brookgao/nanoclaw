@@ -12,6 +12,7 @@ const envConfig = readEnvFile([
   'TZ',
   'GH_TOKEN',
   'GITHUB_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
 ]);
 
 export const ASSISTANT_NAME =
@@ -42,15 +43,20 @@ export const SENDER_ALLOWLIST_PATH = path.join(
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const AGENT_RUNNER_PATH = path.resolve(
+  process.cwd(),
+  'container',
+  'agent-runner',
+  'dist',
+  'index.js',
+);
 
-export const CONTAINER_IMAGE =
-  process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
-export const CONTAINER_TIMEOUT = parseInt(
-  process.env.CONTAINER_TIMEOUT || '1800000',
+export const PROCESS_TIMEOUT = parseInt(
+  process.env.PROCESS_TIMEOUT || '1800000',
   10,
 );
-export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
-  process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
+export const PROCESS_MAX_OUTPUT_SIZE = parseInt(
+  process.env.PROCESS_MAX_OUTPUT_SIZE || '10485760',
   10,
 ); // 10MB default
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
@@ -60,6 +66,7 @@ export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 // readEnvFile contract (see env.ts) is to keep secrets out of the host
 // process env so they don't leak to spawned children (docker, OneCLI, etc.).
 export const GH_TOKEN = envConfig.GH_TOKEN ?? envConfig.GITHUB_TOKEN;
+export const CLAUDE_CODE_OAUTH_TOKEN = envConfig.CLAUDE_CODE_OAUTH_TOKEN;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
