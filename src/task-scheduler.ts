@@ -5,7 +5,6 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
-  GROUPS_DIR,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
