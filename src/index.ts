@@ -20,15 +20,12 @@ import {
 } from './channels/registry.js';
 import {
   ContainerOutput,
+  ensureAgentRunnerBuilt,
   resolveIdleMs,
-  runContainerAgent,
+  runHostAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
-} from './container-runner.js';
-import {
-  cleanupOrphans,
-  ensureContainerRuntimeRunning,
-} from './container-runtime.js';
+} from './host-runner.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -213,7 +210,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
  * Get available groups list for the agent.
  * Returns groups ordered by most recent activity.
  */
-export function getAvailableGroups(): import('./container-runner.js').AvailableGroup[] {
+export function getAvailableGroups(): import('./host-runner.js').AvailableGroup[] {
   const chats = getAllChats();
   const registeredJids = new Set(Object.keys(registeredGroups));
 
@@ -454,7 +451,7 @@ async function runAgent(
     : undefined;
 
   try {
-    const output = await runContainerAgent(
+    const output = await runHostAgent(
       group,
       {
         prompt,
@@ -506,8 +503,8 @@ async function runAgent(
     // Check for knowledge promotion threshold after successful container exit
     const memoryDir = path.join(resolveGroupFolderPath(group.folder), 'memory');
     if (shouldPromote(memoryDir)) {
-      spawnDistiller(group, chatJid).catch(err =>
-        logger.warn({ group: group.name, err }, 'Background distiller failed')
+      spawnDistiller(group, chatJid).catch((err) =>
+        logger.warn({ group: group.name, err }, 'Background distiller failed'),
       );
     }
 
@@ -646,13 +643,12 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
+function ensureSystemRunning(): void {
+  ensureAgentRunnerBuilt();
 }
 
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  ensureSystemRunning();
   initDatabase();
   logger.info('Database initialized');
   loadState();
