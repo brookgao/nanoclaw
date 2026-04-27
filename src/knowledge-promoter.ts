@@ -3,7 +3,7 @@ import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { runContainerAgent } from './container-runner.js';
+import { runHostAgent } from './host-runner.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
@@ -43,24 +43,15 @@ export async function spawnDistiller(
   clearPromotionFlag(path.join(groupDir, 'memory'));
 
   try {
-    await runContainerAgent(
+    await runHostAgent(
       {
         ...group,
         containerConfig: {
           ...group.containerConfig,
-          additionalMounts: [
-            ...(group.containerConfig?.additionalMounts ?? []),
-            {
-              hostPath: globalWikiDir,
-              containerPath: 'shared-wiki-rw',
-              readonly: false,
-            },
-          ],
         },
       },
       {
-        prompt:
-          'Run the /knowledge-distiller skill now. Write wiki pages to /workspace/extra/shared-wiki-rw/ (it is mounted read-write). The readonly /workspace/shared-wiki is for reading existing wiki content only.',
+        prompt: `Run the /knowledge-distiller skill now. Write wiki pages to ${globalWikiDir} (read-write). The shared wiki at ${globalWikiDir} contains existing wiki content.`,
         groupFolder: group.folder,
         chatJid,
         isMain: group.isMain === true,
