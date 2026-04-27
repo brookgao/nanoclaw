@@ -3,13 +3,18 @@ import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, GROUPS_DIR, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  GROUPS_DIR,
+  SCHEDULER_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import { hasUnpromotedEntries, spawnDistiller } from './knowledge-promoter.js';
 import {
   ContainerOutput,
-  runContainerAgent,
+  runHostAgent,
   writeTasksSnapshot,
-} from './container-runner.js';
+} from './host-runner.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -172,7 +177,7 @@ async function runTask(
   };
 
   try {
-    const output = await runContainerAgent(
+    const output = await runHostAgent(
       group,
       {
         prompt: task.prompt,
@@ -244,7 +249,9 @@ async function runTask(
 
 let lastPromotionDate = '';
 
-async function runDailyKnowledgePromotion(deps: SchedulerDependencies): Promise<void> {
+async function runDailyKnowledgePromotion(
+  deps: SchedulerDependencies,
+): Promise<void> {
   const today = new Date().toISOString().split('T')[0];
   if (today === lastPromotionDate) return;
 
@@ -262,8 +269,11 @@ async function runDailyKnowledgePromotion(deps: SchedulerDependencies): Promise<
       'session-learnings.md',
     );
     if (hasUnpromotedEntries(learningsPath)) {
-      logger.info({ group: group.folder }, 'Daily promotion: group has unpromoted entries');
-      spawnDistiller(group, chatJid).catch(err =>
+      logger.info(
+        { group: group.folder },
+        'Daily promotion: group has unpromoted entries',
+      );
+      spawnDistiller(group, chatJid).catch((err) =>
         logger.warn({ group: group.folder, err }, 'Daily promotion failed'),
       );
     }
