@@ -31,16 +31,20 @@ describe('formatTokenCount', () => {
 });
 
 describe('formatTokenFooter', () => {
-  it('formats the canonical user-approved layout', () => {
+  it('formats the canonical user-approved layout with ctx percentage', () => {
+    // 12400 + 8200 + 0 = 20600 → 20600/200000 = 10.3% → rounds to 10%
     expect(
       formatTokenFooter({
         inputTokens: 12400,
         outputTokens: 2100,
         cacheReadTokens: 8200,
+        cacheCreationTokens: 0,
         costUsd: 0.034,
         numTurns: 3,
       }),
-    ).toBe('· 输入 12.4K · 输出 2.1K · 缓存命中 8.2K · 成本 $0.034 · 3 轮');
+    ).toBe(
+      '· 输入 12.4K · 输出 2.1K · 缓存命中 8.2K · 成本 $0.034 · 3 轮 · ctx:10%',
+    );
   });
 
   it('always shows cache (even when 0)', () => {
@@ -48,12 +52,14 @@ describe('formatTokenFooter', () => {
       inputTokens: 500,
       outputTokens: 100,
       cacheReadTokens: 0,
+      cacheCreationTokens: 0,
       costUsd: 0.001,
       numTurns: 1,
     });
     expect(out).toContain('缓存命中 0');
     expect(out).toContain('成本 $0.001');
     expect(out).toContain('1 轮');
+    expect(out).toContain('ctx:0%');
   });
 
   it('formats cost with 3-decimal precision', () => {
@@ -62,10 +68,37 @@ describe('formatTokenFooter', () => {
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
+        cacheCreationTokens: 0,
         costUsd: 1.234567,
         numTurns: 0,
       }),
     ).toContain('成本 $1.235');
+  });
+
+  it('shows correct percentage for large context', () => {
+    // 3 + 55700 + 0 = 55703 → 55703/200000 = 27.85% → rounds to 28%
+    const out = formatTokenFooter({
+      inputTokens: 3,
+      outputTokens: 380,
+      cacheReadTokens: 55700,
+      cacheCreationTokens: 0,
+      costUsd: 10.201,
+      numTurns: 1,
+    });
+    expect(out).toContain('ctx:28%');
+  });
+
+  it('includes cacheCreationTokens in ctx percentage', () => {
+    // 100 + 50000 + 5000 = 55100 → 55100/200000 = 27.55% → rounds to 28%
+    const out = formatTokenFooter({
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 50000,
+      cacheCreationTokens: 5000,
+      costUsd: 0.5,
+      numTurns: 1,
+    });
+    expect(out).toContain('ctx:28%');
   });
 });
 
@@ -75,11 +108,12 @@ describe('appendTokenFooter', () => {
       inputTokens: 100,
       outputTokens: 50,
       cacheReadTokens: 0,
+      cacheCreationTokens: 0,
       costUsd: 0.001,
       numTurns: 1,
     });
     expect(result).toBe(
-      'Andy 的回复\n\n· 输入 100 · 输出 50 · 缓存命中 0 · 成本 $0.001 · 1 轮',
+      'Andy 的回复\n\n· 输入 100 · 输出 50 · 缓存命中 0 · 成本 $0.001 · 1 轮 · ctx:0%',
     );
   });
 
@@ -89,6 +123,7 @@ describe('appendTokenFooter', () => {
         inputTokens: 1,
         outputTokens: 1,
         cacheReadTokens: 0,
+        cacheCreationTokens: 0,
         costUsd: 0,
         numTurns: 0,
       }),

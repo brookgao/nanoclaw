@@ -47,6 +47,7 @@ interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheCreationTokens: number;
   costUsd: number;
   numTurns: number;
 }
@@ -696,6 +697,7 @@ async function runQuery(
           input_tokens?: number;
           output_tokens?: number;
           cache_read_input_tokens?: number;
+          cache_creation_input_tokens?: number;
         };
         total_cost_usd?: number;
         num_turns?: number;
@@ -705,6 +707,7 @@ async function runQuery(
             inputTokens: r.usage.input_tokens ?? 0,
             outputTokens: r.usage.output_tokens ?? 0,
             cacheReadTokens: r.usage.cache_read_input_tokens ?? 0,
+            cacheCreationTokens: r.usage.cache_creation_input_tokens ?? 0,
             costUsd: r.total_cost_usd ?? 0,
             numTurns: r.num_turns ?? 0,
           }
@@ -809,7 +812,7 @@ async function main(): Promise<void> {
   const sdkEnv: Record<string, string | undefined> = {
     ...process.env,
     CLAUDE_CODE_AUTO_COMPACT_WINDOW:
-      process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '120000',
+      process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '60000',
   };
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));

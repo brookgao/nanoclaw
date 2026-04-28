@@ -42,6 +42,7 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheCreationTokens: number;
   costUsd: number;
   numTurns: number;
 }
@@ -294,7 +295,7 @@ async function buildProcessEnv(
     ),
     TZ: TIMEZONE,
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(
-      group.containerConfig?.autoCompactWindow ?? 120000,
+      group.containerConfig?.autoCompactWindow ?? 60000,
     ),
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
     CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
