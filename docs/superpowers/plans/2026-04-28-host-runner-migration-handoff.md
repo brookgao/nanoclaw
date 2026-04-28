@@ -60,24 +60,21 @@ c1c6d37 docs: host-runner migration design spec
 | 服务启动 | ✅ 10 groups, feishu WS connected |
 | Agent 响应 | ✅ "收到！"，session 连续性正常 |
 | Cache 命中 | ✅ 第二条消息 cacheReadTokens ~31K |
-| 重复发送 | ❌ 每条消息回复两次 (见下方) |
+| 重复发送 | ✅ 已解决 — 根因见下方 |
 
-## 已知问题：重复发送 Bug
+## 已解决：重复发送 Bug
 
 **现象：** 用户发一条消息，阿飞回复两次相同内容（不同 token 用量）。
 
-**排查进展：**
-1. 不是 stale session 问题（第二条消息也重复，此时 session 已正常）
-2. 不是 IPC 文件残留（input 目录为空）
-3. 两次输出有不同的 `cacheReadTokens`（30982 vs 31063），说明是两次独立的 SDK `query()` 调用
-4. 日志只显示一次 `New messages`、无第二次 `Spawning host agent`，说明宿主端只触发了一次
-5. **怀疑方向：** agent-runner 内部 `pollIpcDuringQuery`（query 期间轮询 IPC 输入）与 `waitForIpcMessage`（query 间等待）之间可能存在竞态，导致同一条消息被消费两次
+**根因：** 不是代码 bug。是 **两个 nanoclaw 实例同时运行**：
+- launchd 管理的生产服务（`com.nanoclaw`，使用旧的 `dist/index.js`）
+- 手动启动的 dev 服务（`npx tsx src/index.ts`）
 
-**排查建议：**
-- 在 `drainIpcInput()` 中加日志，记录每次读取的文件名和内容
-- 在 `pollIpcDuringQuery` 和 `waitForIpcMessage` 中加互斥标记
-- 检查 `writeOutput()` 调用次数：是一次 query 产生两个 result，还是两次 query 各产生一个 result
-- 对比容器模式是否也有此问题（可能是 pre-existing bug）
+两个进程都连着飞书 WebSocket，收到同一条消息，各自 spawn agent 回复一次。
+
+**验证：** 停掉 launchd 服务和残留 Docker 容器后，单实例运行只产生一条回复。
+
+**预防措施：** 迁移后需要重新构建 `dist/` 并重启 launchd 服务，确保只有一个实例。
 
 ## 架构变化要点
 

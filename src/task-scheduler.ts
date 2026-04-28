@@ -3,11 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 import path from 'path';
 
-import {
-  ASSISTANT_NAME,
-  SCHEDULER_POLL_INTERVAL,
-  TIMEZONE,
-} from './config.js';
+import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { hasUnpromotedEntries, spawnDistiller } from './knowledge-promoter.js';
 import {
   ContainerOutput,

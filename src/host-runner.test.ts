@@ -252,7 +252,9 @@ describe('runHostAgent', () => {
     // Re-check: write/end happen synchronously at Promise construction time (after await buildProcessEnv).
     // Since we spied after flushMicrotasks, the calls already happened — check call counts:
     // Instead just verify the process succeeds (stdin was written correctly)
-    expect(writeSpy.mock.calls.length + endSpy.mock.calls.length).toBeGreaterThanOrEqual(0);
+    expect(
+      writeSpy.mock.calls.length + endSpy.mock.calls.length,
+    ).toBeGreaterThanOrEqual(0);
     expect((await promise) === undefined || true).toBe(true); // promise already resolved
   });
 
@@ -316,9 +318,14 @@ describe('runHostAgent', () => {
 
   it('calls onOutput for each streamed result chunk', async () => {
     const outputs: ContainerOutput[] = [];
-    const promise = runHostAgent(baseGroup, baseInput, () => {}, async (o) => {
-      outputs.push(o);
-    });
+    const promise = runHostAgent(
+      baseGroup,
+      baseInput,
+      () => {},
+      async (o) => {
+        outputs.push(o);
+      },
+    );
 
     await flushMicrotasks();
     const output: ContainerOutput = {
@@ -335,7 +342,12 @@ describe('runHostAgent', () => {
   });
 
   it('returns success with null result in streaming mode', async () => {
-    const promise = runHostAgent(baseGroup, baseInput, () => {}, async () => {});
+    const promise = runHostAgent(
+      baseGroup,
+      baseInput,
+      () => {},
+      async () => {},
+    );
 
     await flushMicrotasks();
     emitSuccess(mockProc, { status: 'success', result: 'chunk' });
@@ -347,16 +359,25 @@ describe('runHostAgent', () => {
 
   it('handles multiple streamed chunks from the same stdout push', async () => {
     const outputs: ContainerOutput[] = [];
-    const promise = runHostAgent(baseGroup, baseInput, () => {}, async (o) => {
-      outputs.push(o);
-    });
+    const promise = runHostAgent(
+      baseGroup,
+      baseInput,
+      () => {},
+      async (o) => {
+        outputs.push(o);
+      },
+    );
 
     await flushMicrotasks();
     const chunk1: ContainerOutput = { status: 'success', result: 'first' };
-    const chunk2: ContainerOutput = { status: 'success', result: 'second', newSessionId: 's1' };
+    const chunk2: ContainerOutput = {
+      status: 'success',
+      result: 'second',
+      newSessionId: 's1',
+    };
     mockProc.stdout.push(
       `${OUTPUT_START_MARKER}\n${JSON.stringify(chunk1)}\n${OUTPUT_END_MARKER}\n` +
-      `${OUTPUT_START_MARKER}\n${JSON.stringify(chunk2)}\n${OUTPUT_END_MARKER}\n`,
+        `${OUTPUT_START_MARKER}\n${JSON.stringify(chunk2)}\n${OUTPUT_END_MARKER}\n`,
     );
     closeProcess(mockProc, 0);
     await promise;
@@ -367,10 +388,19 @@ describe('runHostAgent', () => {
   });
 
   it('propagates newSessionId from streamed output to final result', async () => {
-    const promise = runHostAgent(baseGroup, baseInput, () => {}, async () => {});
+    const promise = runHostAgent(
+      baseGroup,
+      baseInput,
+      () => {},
+      async () => {},
+    );
 
     await flushMicrotasks();
-    emitSuccess(mockProc, { status: 'success', result: 'r', newSessionId: 'new-sess' });
+    emitSuccess(mockProc, {
+      status: 'success',
+      result: 'r',
+      newSessionId: 'new-sess',
+    });
     const result = await promise;
 
     expect(result.newSessionId).toBe('new-sess');
@@ -440,7 +470,12 @@ describe('runHostAgent', () => {
   });
 
   it('timeout after streaming output resolves to success (idle cleanup)', async () => {
-    const promise = runHostAgent(shortTimeoutGroup, baseInput, () => {}, async () => {});
+    const promise = runHostAgent(
+      shortTimeoutGroup,
+      baseInput,
+      () => {},
+      async () => {},
+    );
     await flushMicrotasks();
 
     // Emit streaming output before timeout fires
