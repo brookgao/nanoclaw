@@ -24,6 +24,32 @@ LLM 配置存储在 `EmployeeLLMConfig` 表，按 `agent_key` + `config_key` 索
 - `model`：模型名称（如 `claude-sonnet-4-6`、`gpt-4.1-mini`）
 - `temperature`：温度参数
 
+Provider 级配置存储在 `llm_provider` 表：
+- `base_url`：自定义 API endpoint
+- `proxy_url`：provider 级代理 URL（2026-04-28 新增，空值 = 不使用代理）
+
+## proxy_url 代理注入方式
+
+不同 provider 的注入方式不同（见 PR #1388）：
+
+| provider 类型 | 注入方式 |
+|---|---|
+| `anthropic` | 构建后替换私有属性 `llm._client._client` / `llm._async_client._async_client`（ChatAnthropic 不支持构造参数注入） |
+| OpenAI compatible | 构造时传 `http_client=httpx.Client(proxy=...)` / `http_async_client` |
+
+**注意**：Anthropic 注入依赖内部私有属性，升级 `langchain-anthropic` 前需回归验证。
+
+## LLM JSON 解析规范（2026-04-28）
+
+**铁规**：禁止对 LLM 输出直接调用 `json.loads()`。统一使用：
+
+```python
+from app.agents.utils.llm_json import loads as llm_json_loads
+result = llm_json_loads(text, context="节点名称")
+```
+
+`llm_json.loads()` 自动处理：markdown 代码块包裹、尾部逗号、Python dict 语法。失败返回 `None` 并记录 warning 日志。
+
 ## 重要注意事项
 
 **`provider=google` 在中国大陆无法访问**。如果 DB 中存在 `provider='google'` 的配置，API 调用会超时或报错。
@@ -56,3 +82,5 @@ concierge 节点应切换为 `claude-sonnet-4-6`，同时将 `_load_history(limi
 
 - [architecture](../architecture.md)
 - [known-issues](../known-issues.md)
+- [learnings/llm-provider-proxy](../../learnings/nine/llm-provider-proxy.md)
+- [learnings/encryption-key-separation](../../learnings/nine/encryption-key-separation.md)

@@ -17,7 +17,11 @@ Andy's knowledge base. Read this on startup for a global view.
 - [known-issues](nine/known-issues.md) — 反复出现的 bug 模式、性能问题、架构待改造方向
 - [ops-checklist](nine/ops-checklist.md) — 运维前置检查：LLM 配置、健康检查、部署脚本
 - [modules/llm-factory](nine/modules/llm-factory.md) — llm_factory.py 提供商切换、性能基准、google provider 禁区
-- [modules/skill-api](nine/modules/skill-api.md) — 统一 Skill 列表/文件内容 API（Python + Go + 前端 SkillDetail 详情页）
+- [modules/skill-api](nine/modules/skill-api.md) — 统一 Skill 列表/文件内容 API（Python + Go + 前端 SkillDetail 详情页 + 用户授权 Admin Panel）
+- [learnings/skill-binding-admin-ui](learnings/nine/skill-binding-admin-ui.md) — 用户 skill 授权管理面板：category 字段、卡片 UI、权限保留逻辑
+- [learnings/llm-provider-proxy](learnings/nine/llm-provider-proxy.md) — provider 级 proxy_url 字段 + llm_json.loads() 统一 JSON 解析入口
+- [learnings/vm-verify-auto-login](learnings/nine/vm-verify-auto-login.md) — browser-vnc JWT 自动登录注入，免飞书扫码，SSO 等待预算大幅压缩
+- [learnings/encryption-key-separation](learnings/nine/encryption-key-separation.md) — API Key 加密密钥与 JWT 验签密钥分离，修复"密钥解密失败"根因
 
 ## Decisions
 
@@ -56,6 +60,7 @@ Andy's knowledge base. Read this on startup for a global view.
 ### Milestone / Phase / 消息
 - [milestone-phase](learnings/nine/milestone-phase.md) — Milestone 卡片数据缺失、phase时序错误
 - [message-persistence](learnings/nine/message-persistence.md) — Ghost message、持久化缺口
+- [chat-state-builder-round](learnings/nine/chat-state-builder-round.md) — 多轮回跳时 phase group key 必须含 round 维度，修 issue #1218
 
 ### 代码质量 / 架构模式
 - [error-handling-shared-layer](learnings/nine/error-handling-shared-layer.md) — 错误在共享层捕获，不在各调用点分散
@@ -64,6 +69,11 @@ Andy's knowledge base. Read this on startup for a global view.
 - [concurrency-race-conditions](learnings/nine/concurrency-race-conditions.md) — resume竞态、rootfs并发覆写
 - [data-pipeline](learnings/nine/data-pipeline.md) — 数据管道必须端到端完整
 - [python-code-quality](learnings/nine/python-code-quality.md) — UnboundLocalError、all([])空列表陷阱
+
+### LLM 配置 / 安全 / VM 验收
+- [llm-provider-proxy](learnings/nine/llm-provider-proxy.md) — provider 级 proxy_url 字段 + llm_json.loads() 统一 JSON 解析入口
+- [vm-verify-auto-login](learnings/nine/vm-verify-auto-login.md) — browser-vnc JWT 自动登录注入，免飞书扫码，SSO 等待预算大幅压缩
+- [encryption-key-separation](learnings/nine/encryption-key-separation.md) — API Key 加密密钥与 JWT 验签密钥分离，修复"密钥解密失败"根因
 
 ### 其他
 - [business-map-search](learnings/nine/business-map-search.md) — business_map 描述丢失（PR #528）

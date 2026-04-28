@@ -66,7 +66,6 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { appendTokenFooter } from './token-footer.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { shouldPromote, spawnDistiller } from './knowledge-promoter.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -498,14 +497,6 @@ async function runAgent(
         'Container agent error',
       );
       return 'error';
-    }
-
-    // Check for knowledge promotion threshold after successful container exit
-    const memoryDir = path.join(resolveGroupFolderPath(group.folder), 'memory');
-    if (shouldPromote(memoryDir)) {
-      spawnDistiller(group, chatJid).catch((err) =>
-        logger.warn({ group: group.name, err }, 'Background distiller failed'),
-      );
     }
 
     return 'success';

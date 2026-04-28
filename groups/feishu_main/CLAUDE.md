@@ -26,10 +26,13 @@ Full personality, project context, detailed workflow rules in `soul.md` — read
 
 On every session start, read these files in order:
 1. `soul.md` — identity, project role, tmux workflow, quality rules
-2. `/workspace/group/wiki/index.md` — knowledge base overview
-3. `/workspace/group/memory/facts.md` — persistent facts
+2. `memory/facts.md` — persistent facts
+3. Wiki 概览（用 FTS5 query 代替手动 index）：
+   ```bash
+   sqlite3 ../../store/messages.db "SELECT path, title FROM wiki_fts ORDER BY path;"
+   ```
 
-Other files (`memory/session-learnings.md`, specific wiki pages) — read when relevant, not every time.
+需要深入了解某个话题时再用 FTS5 搜索具体 wiki 页面。
 
 ---
 
@@ -121,72 +124,59 @@ strip 逻辑在 router.ts 里。  ← 必须先核实再说
 strip 逻辑在 router.ts 里。  ← 结论性陈述但缺 <internal>依据:</internal>
 ```
 
-## Wiki Knowledge Management
+## Wiki + 记忆（两层，没有第三层）
 
-Persistent wiki at `/workspace/group/wiki/`. Long-term knowledge base.
+**存储**：
+- `memory/facts.md` — 短条目：概念定义、约定、用户偏好。启动必读。
+- `wiki/` + FTS5（`../../store/messages.db`）— 长内容：架构文档、踩坑详解、操作手册。按需搜索。
 
-### Search First
-Before reading code or asking dev-claude, search the wiki:
+**跨工具共享**：重要教训同步写进项目 CLAUDE.md（如 nine/CLAUDE.md），CLI/Codex/阿飞都能读。
+
+### 搜 Wiki
 ```bash
-sqlite3 /workspace/project/store/messages.db \
+sqlite3 ../../store/messages.db \
   "SELECT path, snippet(wiki_fts,3,'→','←','...',20) FROM wiki_fts WHERE wiki_fts MATCH 'keywords' ORDER BY rank LIMIT 5;"
 ```
-Search returns relative paths like `wiki/nine/architecture.md`. Read them at `/workspace/group/<path>`. Nothing found → fall back to tmux bridge or code.
+搜到的 path 如 `wiki/nine/architecture.md`，直接 Read。没搜到 → tmux bridge 或代码。
 
 **Tokenizer 坑**（`porter unicode61`）：
-- 连字符词要引号：`MATCH '"tmux-bridge"'`（不加引号会报 `no such column: bridge`）
-- 短中文查询（2-3 字）可能静默无结果 — 用完整短语。例：搜 `已授权` → 0 条；搜 `已授权的例行动作` → ✅
+- 连字符词要引号：`MATCH '"tmux-bridge"'`
+- 短中文查询可能静默无结果 — 用完整短语
 
-### Write Rules
-After creating or updating any wiki page, always:
-1. Update `/workspace/group/wiki/index.md` (add/modify the entry)
-2. Upsert the FTS5 index:
+### 写 Wiki
+写完一个 wiki 页后，只做一件事——upsert FTS5：
 ```bash
-sqlite3 /workspace/project/store/messages.db "DELETE FROM wiki_fts WHERE path='<relative-path>';"
-sqlite3 /workspace/project/store/messages.db "INSERT INTO wiki_fts(path,title,summary,body) VALUES('<path>','<title>','<summary>','<body>');"
+sqlite3 ../../store/messages.db "DELETE FROM wiki_fts WHERE path='<relative-path>';"
+sqlite3 ../../store/messages.db "INSERT INTO wiki_fts(path,title,summary,body) VALUES('<path>','<title>','<summary>','<body>');"
 ```
-3. Append one line to `/workspace/group/wiki/log.md`: `[YYYY-MM-DD] <action>: <path> — <description>`
-4. Page format: title + one-line summary (blockquote) + body + `## Related` (cross-references)
+页面格式：标题 + 一行摘要（blockquote）+ 正文 + `## Related`
 
-### Memory Fencing
-When injecting wiki or memory content into your context, wrap it:
-```
-<memory-context source="wiki/nine/architecture.md">
-Content here...
-</memory-context>
-```
+### 知识写入（硬红线）
 
-### Post-Task Ingest（硬红线 — 每次有实质产出后必须执行，不可跳过）
+**触发条件**（满足任一就写，不等任务结束）：
+- 完成 dev task（代码改动、bug 修复、调查结论）
+- 用户纠正了你的理解
+- 用户定义了新概念或解释了流程
+- 用户第二次解释同一件事
 
-**触发条件**：完成任何 dev task（代码改动、bug 修复、调查结论、部署操作）后，在回复用户"已完成"之前。
-**跳过条件**：纯问答、格式修复、单纯转达信息。
+**判断写哪里**：
+- 一句话能说清（概念定义、约定、偏好）→ append `memory/facts.md`
+- 需要展开（架构决策、踩坑详解、操作手册）→ 写 wiki 页 + upsert FTS5
+- 对其他工具也重要的教训 → 额外写进项目 CLAUDE.md
 
-**必须执行以下全部步骤**：
+**自检**：用户纠正过你但 facts.md 没有新增条目 = 违反硬红线。停下来补。
 
-1. **回顾**：这次做了什么？踩了什么坑？根因是什么？做了什么决策？用户纠正了什么？
-2. **Wiki 写入**：
-   - Architecture changes → create/update `/workspace/group/wiki/decisions/`
-   - Bug lessons → create/update `/workspace/group/wiki/learnings/`
-   - Module changes → update `/workspace/group/wiki/nine/`
-   - 更新 wiki/index.md + FTS5 + wiki/log.md
-3. **session-learnings 写入**：append to `/workspace/group/memory/session-learnings.md`，格式：`[YYYY-MM-DD] 结论 | 教训 | 下次怎么做`
-4. **facts 写入**：如有持久事实 → append to `/workspace/group/memory/facts.md`
-5. **决策树更新**：如果踩坑暴露了 `wiki/operations/autonomy-framework.md` 第二关没覆盖的新高危模式 → 回去更新
+**反模式**：
+- ❌ 纠正后只说"明白了"但不写入任何持久存储
+- ❌ 把概念只放在当前对话 context 里
+- ❌ 等到"任务完成"再写
 
-**自检**：如果你准备回复"已完成"但 session-learnings.md 没有新增条目，说明你漏了这一步。停下来补。
+### 手动记录
+用户说"ingest"、"记到 wiki"、"record this" → 写 wiki 页 + FTS5。
 
-### Manual Ingest
-When user says "ingest", "记到 wiki", or "record this":
-Read the content → write to appropriate wiki category → update index + FTS5 + log.
+## 自治 · Git 风格
 
-## Memory
-
-- `/workspace/group/memory/facts.md` — persistent facts about user, team, conventions. Bullet + date. Read on startup.
-- `/workspace/group/memory/session-learnings.md` — post-task learnings (conclusion + lesson + next-time). When 10+ entries accumulate, promote valuable ones to wiki pages and clean up.
-
-## 自治 · 经验提炼 · Git 风格
-
-遇到需要判断"自己决定 vs 问用户"、任务完成后提炼经验、写代码前学 git 风格时：
+遇到需要判断"自己决定 vs 问用户"、写代码前学 git 风格时：
 → FTS5 搜 `autonomy-framework` 或直读 `wiki/operations/autonomy-framework.md`
 
 ## Message Formatting（飞书）
@@ -244,19 +234,3 @@ Read and write `/workspace/global/CLAUDE.md` for facts that apply to all groups.
 - **Session/context 管理**（context rot、五条岔路）→ FTS5 search `session-management` or read `wiki/learnings/nanoclaw-session-management.md`
 - **线上排查 5 步法**（trace_id → Jaeger → Loki → GlitchTip → 报告）→ FTS5 search `troubleshooting` or read `wiki/operations/ai-troubleshooting-5steps.md`；完整命令清单见 `/workspace/extra/vibe-coding/nine/docs/kb/observability-debug.md`
 
-## 知识整理
-
-当用户说"整理知识"、"promote learnings"、或"知识提炼"时，执行 `/knowledge-distiller` skill。
-
-如果 `/workspace/shared-wiki` 是只读的，回复用户：
-> 当前环境只读，无法写入共享 wiki。知识整理需要通过系统自动触发（每日凌晨 2 点或积累满 10 条时自动运行）。
-
-### 搜索共享知识库
-
-在回答问题前，可以搜索共享 wiki 了解其他群的历史经验：
-
-```bash
-sqlite3 /workspace/shared-wiki/wiki.db "SELECT path, title, snippet(wiki_fts, 3, '>>>', '<<<', '...', 30) FROM wiki_fts WHERE wiki_fts MATCH '<搜索词>' LIMIT 5;"
-```
-
-如果 wiki.db 不存在，直接用 `grep -ri` 搜索 `/workspace/shared-wiki/` 目录。

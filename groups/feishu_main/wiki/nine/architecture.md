@@ -117,9 +117,33 @@ nine/
 - **部署目录**：`/ai/nine`
 - **部署脚本**：`deploy/scripts/wt-deploy.sh`（worktree 独立容器验证）
 
+## 安全密钥体系（2026-04-28）
+
+两把密钥职责分离（PR #1390）：
+
+| 用途 | 配置键 | 环境变量 |
+|---|---|---|
+| JWT 用户会话验签 | `security.jwt.key` | `JWT_SECRET_KEY` |
+| LLM API Key 加密存储 | `security.encryption.key` | `ENCRYPTION_KEY` |
+
+`ENCRYPTION_KEY` 一旦设定不可随意更换，否则已存 API Key 无法解密。
+
+## VM 验收自动登录（2026-04-28）
+
+browser-vnc VM 验收阶段（phase 3.6）自动注入 Nine JWT token，免除飞书扫码：
+- 密钥来源：`JWT_SECRET` 环境变量 > Go API 配置文件 `security.jwt.key`
+- 注入方式：`browser_evaluate` 写 `localStorage("access_token")` + 刷新页面
+- 注入失败仅 warning，不阻塞验收
+
+SSO 等待预算：工具调用上限 40→12，等待轮数 20→5。
+
+详见 [learnings/vm-verify-auto-login](../learnings/nine/vm-verify-auto-login.md)。
+
 ## Related
 
 - [api-endpoints](api-endpoints.md)
 - [modules/llm-factory](modules/llm-factory.md)
 - [known-issues](known-issues.md)
 - [ops-checklist](ops-checklist.md)
+- [learnings/vm-verify-auto-login](../learnings/nine/vm-verify-auto-login.md)
+- [learnings/encryption-key-separation](../learnings/nine/encryption-key-separation.md)
