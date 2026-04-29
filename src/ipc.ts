@@ -87,6 +87,25 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              // targetSelf: resolve chatJid from sourceGroup's registered JID
+              if (data.type === 'message' && data.targetSelf && !data.chatJid) {
+                const groups = deps.registeredGroups();
+                const jid = Object.keys(groups).find(
+                  (k) => groups[k].folder === sourceGroup,
+                );
+                if (jid) {
+                  data.chatJid = jid;
+                  logger.info(
+                    { sourceGroup, resolvedJid: jid },
+                    'IPC targetSelf resolved',
+                  );
+                } else {
+                  logger.warn(
+                    { sourceGroup },
+                    'IPC targetSelf: no registered JID for sourceGroup',
+                  );
+                }
+              }
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
