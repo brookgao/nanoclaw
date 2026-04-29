@@ -50,6 +50,7 @@ import { handleCreateTopicGroup } from './ipc-sync-handlers.js';
 import { getLatestUserSenderForChat } from './db.js';
 import { FeishuChannel } from './channels/feishu.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { checkDotaDecision } from './dota-bridge.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -255,16 +256,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
+  // For non-main groups, check if trigger is required and present.
+  // Feishu channel gates on @bot mention at the channel layer and strips
+  // the mention text before storing, so skip text matching for feishu.
   if (!isMainGroup && group.requiresTrigger !== false) {
-    const triggerPattern = getTriggerPattern(group.trigger);
-    const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
-      (m) =>
-        triggerPattern.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-    );
-    if (!hasTrigger) return true;
+    if (!chatJid.startsWith('feishu:')) {
+      const triggerPattern = getTriggerPattern(group.trigger);
+      const allowlistCfg = loadSenderAllowlist();
+      const hasTrigger = missedMessages.some(
+        (m) =>
+          triggerPattern.test(m.content.trim()) &&
+          (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+      );
+      if (!hasTrigger) return true;
+    }
   }
 
   const { xml: rawPrompt, images } = formatMessages(missedMessages, TIMEZONE);
@@ -559,15 +564,20 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const triggerPattern = getTriggerPattern(group.trigger);
-            const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
-              (m) =>
-                triggerPattern.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-            );
-            if (!hasTrigger) continue;
+            // Feishu channel gates on @bot mention at the channel layer
+            // and strips the mention text before storing, so text-based
+            // trigger matching would always fail. Trust the channel gate.
+            if (!chatJid.startsWith('feishu:')) {
+              const triggerPattern = getTriggerPattern(group.trigger);
+              const allowlistCfg = loadSenderAllowlist();
+              const hasTrigger = groupMessages.some(
+                (m) =>
+                  triggerPattern.test(m.content.trim()) &&
+                  (m.is_from_me ||
+                    isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+              );
+              if (!hasTrigger) continue;
+            }
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
@@ -714,6 +724,30 @@ async function main(): Promise<void> {
           logger.error({ err, chatJid }, 'Remote control command error'),
         );
         return;
+      }
+
+      // Dota decision bridge: intercept feishu_dm replies to pending dota decisions
+      if (chatJid.startsWith('feishu:') && !msg.is_from_me && !msg.is_bot_message) {
+        const group = registeredGroups[chatJid];
+        if (group?.folder === 'feishu_dm') {
+          const result = checkDotaDecision(
+            msg.content.trim(),
+            (msg as any).reply_to_text,
+          );
+          if (result.handled) {
+            if (result.confirmText) {
+              const channel = findChannel(channels, chatJid);
+              if (channel) {
+                channel
+                  .sendMessage(chatJid, result.confirmText)
+                  .catch((err: any) =>
+                    logger.error({ err }, 'dota-bridge confirm send failed'),
+                  );
+              }
+            }
+            return;
+          }
+        }
       }
 
       // Sender allowlist drop mode: discard messages from denied senders before storing
