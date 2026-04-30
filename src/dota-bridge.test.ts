@@ -14,7 +14,12 @@ function writePending(
   dir: string,
   decisionId: string,
   createdAt: string,
-  extra: Partial<{ sessionId: string; phase: string; question: string; project: string }> = {},
+  extra: Partial<{
+    sessionId: string;
+    phase: string;
+    question: string;
+    project: string;
+  }> = {},
 ): void {
   const pendingDir = path.join(dir, 'pending');
   fs.mkdirSync(pendingDir, { recursive: true });
@@ -26,7 +31,10 @@ function writePending(
     createdAt,
     project: extra.project ?? 'test-project',
   };
-  fs.writeFileSync(path.join(pendingDir, `${decisionId}.json`), JSON.stringify(data, null, 2));
+  fs.writeFileSync(
+    path.join(pendingDir, `${decisionId}.json`),
+    JSON.stringify(data, null, 2),
+  );
 }
 
 describe('checkDotaDecision', () => {
@@ -89,7 +97,7 @@ describe('checkDotaDecision', () => {
     expect(fs.existsSync(replyPath)).toBe(true);
   });
 
-  it('cooldown: second call within 10s returns handled=true without writing another reply file', () => {
+  it('cooldown: duplicate reply for same decision within 10s is suppressed', () => {
     vi.useFakeTimers();
     const now = new Date('2024-06-01T00:00:00.000Z').getTime();
     vi.setSystemTime(now);
@@ -101,19 +109,55 @@ describe('checkDotaDecision', () => {
     expect(first.handled).toBe(true);
     expect(first.confirmText).toContain('dota-200');
 
-    // Advance time by 5s (still within cooldown)
+    // Advance time by 5s, re-add same decision (simulating race)
     vi.setSystemTime(now + 5_000);
+    writePending(tmpDir, 'dota-200', '2024-01-01T10:00:00.000Z');
 
-    writePending(tmpDir, 'dota-201', '2024-01-01T11:00:00.000Z');
-
-    // Second call — within cooldown, should not write reply for dota-201
-    const second = checkDotaDecision('second reply', undefined, tmpDir);
+    // Second call for same decision — within cooldown, suppressed
+    const second = checkDotaDecision('duplicate reply', undefined, tmpDir);
     expect(second.handled).toBe(true);
     expect(second.confirmText).toBe('已收到，忽略重复消息');
+  });
 
-    // dota-201 reply file should NOT exist
+  it('cooldown: different decision within 10s is NOT suppressed', () => {
+    vi.useFakeTimers();
+    const now = new Date('2024-06-01T00:00:00.000Z').getTime();
+    vi.setSystemTime(now);
+
+    writePending(tmpDir, 'dota-200', '2024-01-01T10:00:00.000Z');
+    const first = checkDotaDecision('first reply', undefined, tmpDir);
+    expect(first.handled).toBe(true);
+    expect(first.confirmText).toContain('dota-200');
+
+    // Advance 5s, add a different decision
+    vi.setSystemTime(now + 5_000);
+    writePending(tmpDir, 'dota-201', '2024-01-01T11:00:00.000Z');
+
+    // Different decision — should be processed even within 10s window
+    const second = checkDotaDecision('second reply', undefined, tmpDir);
+    expect(second.handled).toBe(true);
+    expect(second.confirmText).toContain('dota-201');
+
     const replyPath = path.join(tmpDir, 'replies', 'dota-201.json');
-    expect(fs.existsSync(replyPath)).toBe(false);
+    expect(fs.existsSync(replyPath)).toBe(true);
+  });
+
+  it('cooldown: same decision after 10s is processed again', () => {
+    vi.useFakeTimers();
+    const now = new Date('2024-06-01T00:00:00.000Z').getTime();
+    vi.setSystemTime(now);
+
+    writePending(tmpDir, 'dota-300', '2024-01-01T10:00:00.000Z');
+    const first = checkDotaDecision('first', undefined, tmpDir);
+    expect(first.handled).toBe(true);
+
+    // Advance past cooldown
+    vi.setSystemTime(now + 11_000);
+    writePending(tmpDir, 'dota-300', '2024-01-01T10:00:00.000Z');
+
+    const second = checkDotaDecision('retry', undefined, tmpDir);
+    expect(second.handled).toBe(true);
+    expect(second.confirmText).toContain('dota-300');
   });
 
   it('ref matching: replyToText with [ref:dota-xxx] targets that specific decision', () => {
@@ -130,10 +174,16 @@ describe('checkDotaDecision', () => {
     expect(result.confirmText).toContain('dota-301');
 
     // dota-301 reply should exist, dota-300 should NOT
-    expect(fs.existsSync(path.join(tmpDir, 'replies', 'dota-301.json'))).toBe(true);
-    expect(fs.existsSync(path.join(tmpDir, 'replies', 'dota-300.json'))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'replies', 'dota-301.json'))).toBe(
+      true,
+    );
+    expect(fs.existsSync(path.join(tmpDir, 'replies', 'dota-300.json'))).toBe(
+      false,
+    );
 
     // dota-300 pending should still exist (not touched)
-    expect(fs.existsSync(path.join(tmpDir, 'pending', 'dota-300.json'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, 'pending', 'dota-300.json'))).toBe(
+      true,
+    );
   });
 });
