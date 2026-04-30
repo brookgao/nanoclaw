@@ -727,12 +727,16 @@ async function main(): Promise<void> {
       }
 
       // Dota decision bridge: intercept feishu_dm replies to pending dota decisions
-      if (chatJid.startsWith('feishu:') && !msg.is_from_me && !msg.is_bot_message) {
+      if (
+        chatJid.startsWith('feishu:') &&
+        !msg.is_from_me &&
+        !msg.is_bot_message
+      ) {
         const group = registeredGroups[chatJid];
         if (group?.folder === 'feishu_dm') {
           const result = checkDotaDecision(
             msg.content.trim(),
-            (msg as any).reply_to_text,
+            msg.reply_to_message_content,
           );
           if (result.handled) {
             if (result.confirmText) {

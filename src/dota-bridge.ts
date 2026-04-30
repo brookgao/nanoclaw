@@ -16,15 +16,17 @@ interface PendingDecision {
   project: string;
 }
 
-const DEFAULT_DECISIONS_DIR = path.join(os.homedir(), '.claude', 'dota-decisions');
+const DEFAULT_DECISIONS_DIR = path.join(
+  os.homedir(),
+  '.claude',
+  'dota-decisions',
+);
 const COOLDOWN_MS = 10_000;
 
-let lastReplyAt = 0;
-let lastDecisionId = '';
+const recentReplies = new Map<string, number>();
 
 export function _resetForTest(): void {
-  lastReplyAt = 0;
-  lastDecisionId = '';
+  recentReplies.clear();
 }
 
 export function checkDotaDecision(
@@ -35,15 +37,18 @@ export function checkDotaDecision(
   const pendingDir = path.join(decisionsDir, 'pending');
   const repliesDir = path.join(decisionsDir, 'replies');
 
-  // Cooldown check
-  if (Date.now() - lastReplyAt < COOLDOWN_MS) {
-    return { handled: true, confirmText: '已收到，忽略重复消息' };
+  // Evict expired cooldown entries
+  const now = Date.now();
+  for (const [id, ts] of recentReplies) {
+    if (now - ts >= COOLDOWN_MS) recentReplies.delete(id);
   }
 
   // Read pending files
   let pendingFiles: string[];
   try {
-    pendingFiles = fs.readdirSync(pendingDir).filter((f) => f.endsWith('.json'));
+    pendingFiles = fs
+      .readdirSync(pendingDir)
+      .filter((f) => f.endsWith('.json'));
   } catch {
     return { handled: false };
   }
@@ -89,6 +94,11 @@ export function checkDotaDecision(
     matched = pendings[0];
   }
 
+  // Per-decision cooldown: skip if this exact decision was already replied to
+  if (recentReplies.has(matched.data.decisionId)) {
+    return { handled: true, confirmText: '已收到，忽略重复消息' };
+  }
+
   // Write reply file
   fs.mkdirSync(repliesDir, { recursive: true });
   const reply = {
@@ -109,9 +119,8 @@ export function checkDotaDecision(
     // ignore
   }
 
-  // Set cooldown
-  lastReplyAt = Date.now();
-  lastDecisionId = matched.data.decisionId;
+  // Set per-decision cooldown
+  recentReplies.set(matched.data.decisionId, Date.now());
 
   return {
     handled: true,
