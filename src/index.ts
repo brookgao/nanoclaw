@@ -363,7 +363,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           text = appendTokenFooter(text, result.usage);
         }
         if (text) {
-          await channel.sendMessage(chatJid, text);
+          await channel.sendMessage(chatJid, text, {
+            suppressForCard: true,
+          });
           outputSentToUser = true;
         }
         // Only reset idle timer on actual results, not session-update markers (result: null)

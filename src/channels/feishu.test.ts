@@ -265,6 +265,51 @@ describe('FeishuChannel sendMessage', () => {
     };
     await expect(ch.sendMessage('feishu:oc_g1', 'hi')).resolves.toBeUndefined();
   });
+
+  it('delivers message even when card session is active (IPC send_message path)', async () => {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    const createSpy = vi
+      .fn()
+      .mockResolvedValue({ code: 0, data: { message_id: 'om_x' } });
+    ch.client = { im: { message: { create: createSpy } } };
+
+    // Simulate an active card session with a messageId
+    ch.cardSessions.set('feishu:oc_g1', {
+      runId: 'run-1',
+      messageId: 'om_card_active',
+      startedAt: Date.now(),
+      prompt: 'test',
+      toolEvents: [],
+      pendingPatch: false,
+    });
+
+    await ch.sendMessage('feishu:oc_g1', 'IPC results here');
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses message when suppressForCard is true and card session active', async () => {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    const createSpy = vi
+      .fn()
+      .mockResolvedValue({ code: 0, data: { message_id: 'om_x' } });
+    ch.client = { im: { message: { create: createSpy } } };
+
+    ch.cardSessions.set('feishu:oc_g1', {
+      runId: 'run-1',
+      messageId: 'om_card_active',
+      startedAt: Date.now(),
+      prompt: 'test',
+      toolEvents: [],
+      pendingPatch: false,
+    });
+
+    await ch.sendMessage('feishu:oc_g1', 'final output', {
+      suppressForCard: true,
+    });
+
+    expect(createSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe('FeishuChannel connect', () => {

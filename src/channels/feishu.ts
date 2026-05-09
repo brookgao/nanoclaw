@@ -160,50 +160,53 @@ function buildCard(session: CardSession): object {
   const tools = session.toolEvents;
   if (tools.length === 0) {
     elements.push({ tag: 'markdown', content: '**工具调用**\n_（暂无）_' });
-  } else {
-    // Older tools compressed into one summary line, last N as expandable panels
-    const older =
-      tools.length > MAX_PANEL_TOOLS
-        ? tools.slice(0, tools.length - MAX_PANEL_TOOLS)
-        : [];
-    const recent = tools.slice(-MAX_PANEL_TOOLS);
-
+  } else if (isFinal) {
+    // Completed: one-line summary grouped by tool type
+    const groups = new Map<string, number>();
+    for (const e of tools) {
+      const n = e.tool || 'unknown';
+      groups.set(n, (groups.get(n) || 0) + 1);
+    }
+    const summary = Array.from(groups.entries())
+      .map(([n, c]) => (c > 1 ? `${n} ×${c}` : n))
+      .join(', ');
     elements.push({
       tag: 'markdown',
-      content: `**工具调用** (共 ${tools.length} 个)`,
+      content: `**工具调用** (共 ${tools.length} 个): ${summary}`,
     });
-
-    if (older.length > 0) {
-      const groups = new Map<string, number>();
-      for (const e of older) {
-        const n = e.tool || 'unknown';
-        groups.set(n, (groups.get(n) || 0) + 1);
-      }
-      const summary = Array.from(groups.entries())
-        .map(([n, c]) => (c > 1 ? `${n} ×${c}` : n))
-        .join(', ');
-      elements.push({
-        tag: 'markdown',
-        content: `_...前 ${older.length} 个已折叠: ✓ ${summary}_`,
-      });
-    }
-
-    for (const ev of recent) {
-      elements.push(buildToolPanel(ev));
-    }
+  } else {
+    // Running: compact one-line entries so user sees live progress
+    const toolLines = tools.map((ev) => _formatToolEntry(ev)).join('\n');
+    elements.push({
+      tag: 'markdown',
+      content: `**工具调用** (共 ${tools.length} 个)\n${toolLines}`,
+    });
   }
 
-  if (isFinal && session.finalText) {
+  if (isFinal) {
     elements.push({ tag: 'hr' });
-    const MAX_BODY = 9000;
-    const truncated = session.finalText.length > MAX_BODY;
-    const body =
-      session.finalText.slice(0, MAX_BODY) +
-      (truncated ? '\n\n_[内容过长，已截断]_' : '');
-    const content = session.tokenFooter
-      ? `${body}\n\n${session.tokenFooter}`
-      : body;
-    elements.push({ tag: 'markdown', content });
+    if (session.finalText) {
+      const MAX_BODY = 9000;
+      const truncated = session.finalText.length > MAX_BODY;
+      const body =
+        session.finalText.slice(0, MAX_BODY) +
+        (truncated ? '\n\n_[内容过长，已截断]_' : '');
+      const content = session.tokenFooter
+        ? `${body}\n\n${session.tokenFooter}`
+        : body;
+      elements.push({ tag: 'markdown', content });
+    } else {
+      const hasSendMessage = tools.some((e) =>
+        e.tool.includes('send_message'),
+      );
+      const fallback = hasSendMessage
+        ? '_结果已通过消息发送，请往上翻看_'
+        : '_未产生文本输出_';
+      const content = session.tokenFooter
+        ? `${fallback}\n\n${session.tokenFooter}`
+        : fallback;
+      elements.push({ tag: 'markdown', content });
+    }
   }
 
   return {
@@ -236,13 +239,18 @@ function buildInterruptedCard(session: {
 
   const tools = session.toolEvents;
   if (tools.length > 0) {
+    const groups = new Map<string, number>();
+    for (const e of tools) {
+      const n = e.tool || 'unknown';
+      groups.set(n, (groups.get(n) || 0) + 1);
+    }
+    const summary = Array.from(groups.entries())
+      .map(([n, c]) => (c > 1 ? `${n} ×${c}` : n))
+      .join(', ');
     elements.push({
       tag: 'markdown',
-      content: `**工具调用** (共 ${tools.length} 个)`,
+      content: `**工具调用** (共 ${tools.length} 个): ${summary}`,
     });
-    for (const ev of tools.slice(-MAX_PANEL_TOOLS)) {
-      elements.push(buildToolPanel(ev));
-    }
   }
 
   elements.push({ tag: 'hr' });
@@ -693,14 +701,15 @@ export class FeishuChannel implements Channel {
     logger.info('[feishu] WS connected');
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(
+    jid: string,
+    text: string,
+    options?: { suppressForCard?: boolean },
+  ): Promise<void> {
     if (!this.ownsJid(jid)) {
       throw new Error(`FeishuChannel cannot send to non-feishu jid: ${jid}`);
     }
-    // When a card session with a messageId is active, the final text will be
-    // patched into the card via onAgentEvent('final'). Sending a plain message
-    // here too would produce a duplicate.
-    if (this.cardSessions.get(jid)?.messageId) {
+    if (options?.suppressForCard && this.cardSessions.get(jid)?.messageId) {
       logger.debug(
         { jid },
         '[feishu] sendMessage suppressed: card session active',
