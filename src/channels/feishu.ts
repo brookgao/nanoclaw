@@ -1079,7 +1079,23 @@ export class FeishuChannel implements Channel {
       for (const e of session.toolEvents) {
         if (e.status === 'running') e.status = 'done';
       }
-      await this.schedulePatch(jid, true);
+
+      const hasSendMessage = session.toolEvents.some((e) =>
+        e.tool.includes('send_message'),
+      );
+      if (!text && hasSendMessage && session.messageId) {
+        this.client.im.message
+          .delete({ path: { message_id: session.messageId } })
+          .catch((err: Error) =>
+            logger.debug(
+              { err: err.message },
+              '[feishu] delete redundant card failed',
+            ),
+          );
+      } else {
+        await this.schedulePatch(jid, true);
+      }
+
       if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
       this.cardSessions.delete(jid);
       deleteActiveCard(jid);
