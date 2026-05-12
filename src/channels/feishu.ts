@@ -1,4 +1,5 @@
 import * as lark from '@larksuiteoapi/node-sdk';
+import { extname } from 'path';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { AgentEvent, Channel, NewMessage } from '../types.js';
 import { logger } from '../logger.js';
@@ -13,6 +14,39 @@ import {
 } from '../image.js';
 
 const JID_PREFIX = 'feishu:';
+
+const TEXT_EXTENSIONS = new Set([
+  '.md',
+  '.txt',
+  '.json',
+  '.yaml',
+  '.yml',
+  '.csv',
+  '.xml',
+  '.html',
+  '.htm',
+  '.css',
+  '.js',
+  '.ts',
+  '.jsx',
+  '.tsx',
+  '.py',
+  '.go',
+  '.rs',
+  '.java',
+  '.kt',
+  '.rb',
+  '.sh',
+  '.sql',
+  '.toml',
+  '.ini',
+  '.cfg',
+  '.conf',
+  '.env',
+  '.log',
+  '.svg',
+]);
+const FILE_MAX_BYTES = 500 * 1024;
 
 // --- Interactive card streaming ---
 
@@ -196,9 +230,7 @@ function buildCard(session: CardSession): object {
         : body;
       elements.push({ tag: 'markdown', content });
     } else {
-      const hasSendMessage = tools.some((e) =>
-        e.tool.includes('send_message'),
-      );
+      const hasSendMessage = tools.some((e) => e.tool.includes('send_message'));
       const fallback = hasSendMessage
         ? '_结果已通过消息发送，请往上翻看_'
         : '_未产生文本输出_';
@@ -299,6 +331,8 @@ export type ParsedInbound = {
   text: string;
   imageKeys: string[];
   botMentioned: boolean;
+  fileKey?: string;
+  fileName?: string;
 };
 
 const MAX_IMAGES_PER_MESSAGE = 5;
@@ -315,6 +349,18 @@ export function parseInbound(
   const mentions = m.mentions ?? [];
   const botMentioned =
     !!botOpenId && mentions.some((x) => x.id?.open_id === botOpenId);
+
+  if (m.message_type === 'file') {
+    try {
+      const c = JSON.parse(m.content);
+      const fileKey: string | undefined = c?.file_key;
+      const fileName: string = c?.file_name ?? 'unknown';
+      if (!fileKey) return null;
+      return { text: '', imageKeys: [], botMentioned, fileKey, fileName };
+    } catch {
+      return null;
+    }
+  }
 
   if (m.message_type === 'text') {
     try {
@@ -426,6 +472,9 @@ export class FeishuChannel implements Channel {
   private cardSessions = new Map<string, CardSession>();
   private readonly CARD_DEBOUNCE_MS = 500;
 
+  // Cache open_id → display name to avoid repeated API calls
+  private nameCache = new Map<string, string>();
+
   constructor(
     private appId: string,
     private appSecret: string,
@@ -454,6 +503,28 @@ export class FeishuChannel implements Channel {
       this.seenMessageIds.delete(evicted);
     }
     return true;
+  }
+
+  private async resolveSenderName(openId: string): Promise<string> {
+    const cached = this.nameCache.get(openId);
+    if (cached) return cached;
+    try {
+      const resp = await this.client.contact.user.get({
+        path: { user_id: openId },
+        params: { user_id_type: 'open_id' },
+      });
+      const name = resp?.data?.user?.name;
+      if (name) {
+        this.nameCache.set(openId, name);
+        return name;
+      }
+    } catch (err) {
+      logger.debug(
+        { openId, err: (err as Error).message },
+        '[feishu] resolveSenderName failed, using open_id',
+      );
+    }
+    return openId;
   }
 
   // Exposed for tests; also called from WS event handler.
@@ -571,11 +642,55 @@ export class FeishuChannel implements Channel {
       this.reactAck(m.message_id); // 👀 for pure-text path (existing behavior preserved)
     }
 
-    // 7) Deliver
+    // 7) Process file attachment if present
+    if (parsed.fileKey) {
+      const ext = extname(parsed.fileName ?? '').toLowerCase();
+      const isTextExt = TEXT_EXTENSIONS.has(ext) || ext === '';
+      if (isTextExt) {
+        try {
+          const buf = await this.downloadFile(m.message_id, parsed.fileKey);
+          let fileText = buf.toString('utf-8');
+          const sizeKB = (buf.length / 1024).toFixed(1);
+          const replacements = (fileText.match(/�/g) ?? []).length;
+          if (replacements > fileText.length * 0.05) {
+            cleanedText += `\n\n[📎 ${parsed.fileName} (${sizeKB} KB) - 不支持的文件类型，请转为文本格式发送]`;
+          } else {
+            if (buf.length > FILE_MAX_BYTES) {
+              fileText = fileText.slice(0, FILE_MAX_BYTES);
+              fileText += `\n[... 文件已截断，原始大小 ${sizeKB} KB，仅显示前 500 KB]`;
+            }
+            cleanedText += `\n\n---📎 ${parsed.fileName} (${sizeKB} KB)---\n${fileText}\n---文件结束---`;
+          }
+        } catch (err) {
+          this.reactFail(m.message_id);
+          const failMsg = `📎 文件下载失败: ${parsed.fileName}`;
+          try {
+            await this.sendMessage(`${JID_PREFIX}${chatId}`, failMsg);
+          } catch (sendErr) {
+            logger.warn(
+              { err: (sendErr as Error).message },
+              '[feishu] send file failure notice errored',
+            );
+          }
+          logger.warn(
+            { err: (err as Error).message, fileName: parsed.fileName },
+            '[feishu] file download failed',
+          );
+          return;
+        }
+      } else {
+        cleanedText += `\n\n[📎 ${parsed.fileName} - 不支持的文件类型，请转为文本格式发送]`;
+      }
+      if (!cleanedText.trim()) cleanedText = `[文件: ${parsed.fileName}]`;
+    }
+
+    // 8) Resolve sender name and deliver
+    const senderName = await this.resolveSenderName(senderOpenId);
     this.deliver(
       chatId,
       m.message_id,
       senderOpenId,
+      senderName,
       cleanedText,
       payload.header?.create_time,
       chatType !== 'p2p',
@@ -587,6 +702,7 @@ export class FeishuChannel implements Channel {
     chatId: string,
     messageId: string,
     senderOpenId: string,
+    senderName: string,
     content: string,
     createTime: string | undefined,
     isGroup: boolean,
@@ -601,7 +717,7 @@ export class FeishuChannel implements Channel {
       id: messageId,
       chat_jid: jid,
       sender: senderOpenId,
-      sender_name: senderOpenId,
+      sender_name: senderName,
       content,
       timestamp: ts,
       images: images.length > 0 ? images : undefined,
@@ -637,6 +753,22 @@ export class FeishuChannel implements Channel {
           '[feishu] reactFail ignored',
         );
       });
+  }
+
+  async downloadFile(messageId: string, fileKey: string): Promise<Buffer> {
+    const res: any = await this.client.request(
+      {
+        method: 'GET',
+        url: `/open-apis/im/v1/messages/${messageId}/resources/${fileKey}`,
+        params: { type: 'file' },
+        responseType: 'arraybuffer',
+      },
+      { maxContentLength: 10 * 1024 * 1024, timeout: 15000 },
+    );
+    if (Buffer.isBuffer(res)) return res;
+    if (res instanceof ArrayBuffer) return Buffer.from(res);
+    if (res?.data) return Buffer.from(res.data);
+    return Buffer.from(res);
   }
 
   async downloadImage(messageId: string, imageKey: string): Promise<Buffer> {
@@ -704,7 +836,7 @@ export class FeishuChannel implements Channel {
   async sendMessage(
     jid: string,
     text: string,
-    options?: { suppressForCard?: boolean },
+    options?: { suppressForCard?: boolean; plainText?: boolean },
   ): Promise<void> {
     if (!this.ownsJid(jid)) {
       throw new Error(`FeishuChannel cannot send to non-feishu jid: ${jid}`);
@@ -717,14 +849,21 @@ export class FeishuChannel implements Channel {
       return;
     }
     const chatId = jid.slice(JID_PREFIX.length);
-    const card = buildMarkdownCard(text);
+
+    // Plain text mode: supports <at user_id="...">name</at> mentions.
+    // Used by scheduled tasks where card rendering strips at-mentions.
+    const msgType = options?.plainText ? 'text' : 'interactive';
+    const content = options?.plainText
+      ? JSON.stringify({ text })
+      : JSON.stringify(buildMarkdownCard(text));
+
     try {
       await this.client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
-          msg_type: 'interactive',
-          content: JSON.stringify(card),
+          msg_type: msgType,
+          content,
         },
       });
     } catch (err) {
@@ -826,6 +965,17 @@ export class FeishuChannel implements Channel {
     const chatId = jid.slice(JID_PREFIX.length);
 
     if (event.kind === 'start') {
+      const prompt = String(event.payload.prompt ?? '');
+
+      // Scheduled tasks only send their final text output — no execution card.
+      if (prompt.startsWith('[SCHEDULED TASK')) {
+        logger.info(
+          { jid, runId: event.runId },
+          '[feishu] scheduled task, skipping card session',
+        );
+        return;
+      }
+
       // Cancel any existing session, but don't create the Feishu card yet —
       // only create when we see the first tool_use. Zero-tool answers (e.g. 2+2=4)
       // fall through to plain sendMessage() below, avoiding a useless card shell.
@@ -851,7 +1001,7 @@ export class FeishuChannel implements Channel {
         runId: event.runId,
         messageId: '', // empty until first tool_use lazy-creates it
         startedAt: event.timestamp,
-        prompt: String(event.payload.prompt ?? ''),
+        prompt,
         toolEvents: [],
         pendingPatch: false,
       });

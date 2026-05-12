@@ -123,14 +123,14 @@ describe('FeishuChannel inbound p2p', () => {
   });
   afterEach(() => restoreEnv(origEnv));
 
-  it('routes p2p text to onMessage with feishu:<chat_id> jid and emits metadata', () => {
+  it('routes p2p text to onMessage with feishu:<chat_id> jid and emits metadata', async () => {
     const onMessage = vi.fn();
     const onChatMetadata = vi.fn();
     const ch = getChannelFactory('feishu')!(
       makeOpts({ onMessage, onChatMetadata }),
     )! as any;
 
-    ch.handleEvent(makeEvent({ chat_id: 'oc_p2p1', text: 'hi andy' }));
+    await ch.handleEvent(makeEvent({ chat_id: 'oc_p2p1', text: 'hi andy' }));
 
     expect(onMessage).toHaveBeenCalledTimes(1);
     const [jid, msg] = onMessage.mock.calls[0];
@@ -153,12 +153,12 @@ describe('FeishuChannel inbound group', () => {
   });
   afterEach(() => restoreEnv(origEnv));
 
-  it('delivers group message when bot is @-mentioned and strips only bot mention', () => {
+  it('delivers group message when bot is @-mentioned and strips only bot mention', async () => {
     const onMessage = vi.fn();
     const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
     ch.botOpenId = 'ou_bot';
 
-    ch.handleEvent(
+    await ch.handleEvent(
       makeEvent({
         chat_id: 'oc_g1',
         chat_type: 'group',
@@ -209,13 +209,13 @@ describe('FeishuChannel inbound group', () => {
     expect(onMessage).not.toHaveBeenCalled();
   });
 
-  it('dedups on message_id (WS reconnect replay)', () => {
+  it('dedups on message_id (WS reconnect replay)', async () => {
     const onMessage = vi.fn();
     const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
     const ev = makeEvent({ message_id: 'om_dup', text: 'once' });
-    ch.handleEvent(ev);
-    ch.handleEvent(ev);
-    ch.handleEvent(ev);
+    await ch.handleEvent(ev);
+    await ch.handleEvent(ev);
+    await ch.handleEvent(ev);
     expect(onMessage).toHaveBeenCalledTimes(1);
   });
 });
@@ -498,14 +498,63 @@ describe('parseInbound', () => {
     expect(r).toBeNull();
   });
 
-  it('other types (audio/video/file/sticker) → returns null', () => {
-    for (const t of ['audio', 'video', 'file', 'sticker']) {
+  it('other types (audio/video/sticker) → returns null', () => {
+    for (const t of ['audio', 'video', 'sticker']) {
       const r = parseInbound(
         { message_type: t, content: '{}', mentions: [] } as any,
         botOpenId,
       );
       expect(r).toBeNull();
     }
+  });
+
+  it('file type → returns fileKey and fileName', () => {
+    const content = JSON.stringify({
+      file_key: 'file_v3_abc123',
+      file_name: 'openspec.md',
+    });
+    const r = parseInbound(
+      { message_type: 'file', content, mentions: [] } as any,
+      botOpenId,
+    );
+    expect(r).not.toBeNull();
+    expect(r!.fileKey).toBe('file_v3_abc123');
+    expect(r!.fileName).toBe('openspec.md');
+    expect(r!.text).toBe('');
+    expect(r!.imageKeys).toEqual([]);
+  });
+
+  it('file type with @bot mention → botMentioned true', () => {
+    const content = JSON.stringify({
+      file_key: 'file_v3_abc123',
+      file_name: 'spec.md',
+    });
+    const r = parseInbound(
+      {
+        message_type: 'file',
+        content,
+        mentions: [{ key: '@_user_1', id: { open_id: botOpenId } }],
+      } as any,
+      botOpenId,
+    );
+    expect(r!.botMentioned).toBe(true);
+  });
+
+  it('file type with malformed JSON → returns null', () => {
+    const r = parseInbound(
+      { message_type: 'file', content: '{bad json', mentions: [] } as any,
+      botOpenId,
+    );
+    expect(r).toBeNull();
+  });
+
+  it('file type without file_key → returns null', () => {
+    const content = JSON.stringify({ file_name: 'test.md' });
+    const r = parseInbound(
+      { message_type: 'file', content, mentions: [] } as any,
+      botOpenId,
+    );
+    expect(r).toBeNull();
   });
 
   it('post: empty text + zero images → returns null', () => {
@@ -640,6 +689,126 @@ describe('FeishuChannel image pipeline', () => {
     expect(onMessage).toHaveBeenCalledTimes(1);
     expect(onMessage.mock.calls[0][1].content).toBe('hello');
     expect(onMessage.mock.calls[0][1].images).toBeUndefined();
+  });
+});
+
+describe('FeishuChannel file attachment pipeline', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  function makeClientMock() {
+    return {
+      im: {
+        messageReaction: {
+          create: vi.fn().mockResolvedValue({}),
+        },
+        message: {
+          create: vi
+            .fn()
+            .mockResolvedValue({ data: { message_id: 'om_reply' } }),
+        },
+      },
+    };
+  }
+
+  it('p2p .md file → content inlined into message text', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+    ch.downloadFile = vi.fn(async () => Buffer.from('# Hello World\n\nThis is a spec.'));
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: 'file_v3_abc', file_name: 'spec.md' }),
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('spec.md');
+    expect(msg.content).toContain('# Hello World');
+    expect(msg.content).toContain('This is a spec.');
+  });
+
+  it('p2p non-text file (.pdf) → degraded message with filename', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: 'file_v3_pdf', file_name: 'report.pdf' }),
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('report.pdf');
+    expect(msg.content).toMatch(/不支持的文件类型/);
+  });
+
+  it('text file > 500 KB → truncated with notice', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+    const bigContent = 'x'.repeat(600 * 1024);
+    ch.downloadFile = vi.fn(async () => Buffer.from(bigContent));
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: 'file_v3_big', file_name: 'huge.txt' }),
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('huge.txt');
+    expect(msg.content).toMatch(/文件已截断/);
+    expect(msg.content.length).toBeLessThan(bigContent.length);
+  });
+
+  it('file download failure → reactFail + error message, no deliver', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+    const sendSpy = vi.spyOn(ch, 'sendMessage').mockResolvedValue(undefined);
+    ch.downloadFile = vi.fn(async () => {
+      throw new Error('download failed');
+    });
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: 'file_v3_fail', file_name: 'broken.md' }),
+      }),
+    );
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(sendSpy).toHaveBeenCalled();
+  });
+
+  it('file with no extension but valid UTF-8 → treated as text', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = makeClientMock();
+    ch.downloadFile = vi.fn(async () => Buffer.from('plain text content'));
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: 'file_v3_noext', file_name: 'Makefile' }),
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('plain text content');
   });
 });
 
