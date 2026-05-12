@@ -229,15 +229,8 @@ function buildCard(session: CardSession): object {
         ? `${body}\n\n${session.tokenFooter}`
         : body;
       elements.push({ tag: 'markdown', content });
-    } else {
-      const hasSendMessage = tools.some((e) => e.tool.includes('send_message'));
-      const fallback = hasSendMessage
-        ? '_结果已通过消息发送，请往上翻看_'
-        : '_未产生文本输出_';
-      const content = session.tokenFooter
-        ? `${fallback}\n\n${session.tokenFooter}`
-        : fallback;
-      elements.push({ tag: 'markdown', content });
+    } else if (session.tokenFooter) {
+      elements.push({ tag: 'markdown', content: session.tokenFooter });
     }
   }
 
