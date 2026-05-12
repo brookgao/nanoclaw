@@ -642,28 +642,55 @@ export class FeishuChannel implements Channel {
       this.reactAck(m.message_id); // 👀 for pure-text path (existing behavior preserved)
     }
 
-    // 7) Process file attachment if present
-    if (parsed.fileKey) {
-      const ext = extname(parsed.fileName ?? '').toLowerCase();
+    // 7) Resolve file info: from direct file message or from replied parent
+    let fileKey = parsed.fileKey;
+    let fileName = parsed.fileName;
+    let fileMessageId = m.message_id;
+    if (!fileKey && m.parent_id) {
+      try {
+        const parentRes: any = await this.client.request({
+          method: 'GET',
+          url: `/open-apis/im/v1/messages/${m.parent_id}`,
+        });
+        const parentMsg = parentRes?.data?.items?.[0];
+        if (parentMsg?.msg_type === 'file' && parentMsg?.body?.content) {
+          const pc = JSON.parse(parentMsg.body.content);
+          if (pc.file_key) {
+            fileKey = pc.file_key;
+            fileName = pc.file_name ?? 'unknown';
+            fileMessageId = m.parent_id;
+          }
+        }
+      } catch (err) {
+        logger.debug(
+          { err: (err as Error).message, parentId: m.parent_id },
+          '[feishu] failed to fetch parent message, skipping file extraction',
+        );
+      }
+    }
+
+    // 8) Process file attachment if present
+    if (fileKey) {
+      const ext = extname(fileName ?? '').toLowerCase();
       const isTextExt = TEXT_EXTENSIONS.has(ext) || ext === '';
       if (isTextExt) {
         try {
-          const buf = await this.downloadFile(m.message_id, parsed.fileKey);
+          const buf = await this.downloadFile(fileMessageId, fileKey);
           let fileText = buf.toString('utf-8');
           const sizeKB = (buf.length / 1024).toFixed(1);
           const replacements = (fileText.match(/�/g) ?? []).length;
           if (replacements > fileText.length * 0.05) {
-            cleanedText += `\n\n[📎 ${parsed.fileName} (${sizeKB} KB) - 不支持的文件类型，请转为文本格式发送]`;
+            cleanedText += `\n\n[📎 ${fileName} (${sizeKB} KB) - 不支持的文件类型，请转为文本格式发送]`;
           } else {
             if (buf.length > FILE_MAX_BYTES) {
               fileText = fileText.slice(0, FILE_MAX_BYTES);
               fileText += `\n[... 文件已截断，原始大小 ${sizeKB} KB，仅显示前 500 KB]`;
             }
-            cleanedText += `\n\n---📎 ${parsed.fileName} (${sizeKB} KB)---\n${fileText}\n---文件结束---`;
+            cleanedText += `\n\n---📎 ${fileName} (${sizeKB} KB)---\n${fileText}\n---文件结束---`;
           }
         } catch (err) {
           this.reactFail(m.message_id);
-          const failMsg = `📎 文件下载失败: ${parsed.fileName}`;
+          const failMsg = `📎 文件下载失败: ${fileName}`;
           try {
             await this.sendMessage(`${JID_PREFIX}${chatId}`, failMsg);
           } catch (sendErr) {
@@ -673,15 +700,15 @@ export class FeishuChannel implements Channel {
             );
           }
           logger.warn(
-            { err: (err as Error).message, fileName: parsed.fileName },
+            { err: (err as Error).message, fileName },
             '[feishu] file download failed',
           );
           return;
         }
       } else {
-        cleanedText += `\n\n[📎 ${parsed.fileName} - 不支持的文件类型，请转为文本格式发送]`;
+        cleanedText += `\n\n[📎 ${fileName} - 不支持的文件类型，请转为文本格式发送]`;
       }
-      if (!cleanedText.trim()) cleanedText = `[文件: ${parsed.fileName}]`;
+      if (!cleanedText.trim()) cleanedText = `[文件: ${fileName}]`;
     }
 
     // 8) Resolve sender name and deliver

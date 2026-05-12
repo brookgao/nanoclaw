@@ -46,9 +46,21 @@ function makeEvent(
     sender_id: string;
     sender_type: 'user' | 'app';
     message_id: string;
+    parent_id: string;
     mentions: Array<{ key?: string; id: { open_id: string } }>;
   }> = {},
 ): any {
+  const message: any = {
+    message_id:
+      overrides.message_id ?? `om_${Math.random().toString(36).slice(2)}`,
+    chat_id: overrides.chat_id ?? 'oc_p2p1',
+    chat_type: overrides.chat_type ?? 'p2p',
+    message_type: overrides.msg_type ?? 'text',
+    content:
+      overrides.content ?? JSON.stringify({ text: overrides.text ?? 'hello' }),
+    mentions: overrides.mentions ?? [],
+  };
+  if (overrides.parent_id) message.parent_id = overrides.parent_id;
   return {
     schema: '2.0',
     header: {
@@ -60,17 +72,7 @@ function makeEvent(
         sender_id: { open_id: overrides.sender_id ?? 'ou_user1' },
         sender_type: overrides.sender_type ?? 'user',
       },
-      message: {
-        message_id:
-          overrides.message_id ?? `om_${Math.random().toString(36).slice(2)}`,
-        chat_id: overrides.chat_id ?? 'oc_p2p1',
-        chat_type: overrides.chat_type ?? 'p2p',
-        message_type: overrides.msg_type ?? 'text',
-        content:
-          overrides.content ??
-          JSON.stringify({ text: overrides.text ?? 'hello' }),
-        mentions: overrides.mentions ?? [],
-      },
+      message,
     },
   };
 }
@@ -718,12 +720,17 @@ describe('FeishuChannel file attachment pipeline', () => {
     const onMessage = vi.fn();
     const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
     ch.client = makeClientMock();
-    ch.downloadFile = vi.fn(async () => Buffer.from('# Hello World\n\nThis is a spec.'));
+    ch.downloadFile = vi.fn(async () =>
+      Buffer.from('# Hello World\n\nThis is a spec.'),
+    );
 
     await ch.handleEvent(
       makeEvent({
         msg_type: 'file',
-        content: JSON.stringify({ file_key: 'file_v3_abc', file_name: 'spec.md' }),
+        content: JSON.stringify({
+          file_key: 'file_v3_abc',
+          file_name: 'spec.md',
+        }),
       }),
     );
 
@@ -742,7 +749,10 @@ describe('FeishuChannel file attachment pipeline', () => {
     await ch.handleEvent(
       makeEvent({
         msg_type: 'file',
-        content: JSON.stringify({ file_key: 'file_v3_pdf', file_name: 'report.pdf' }),
+        content: JSON.stringify({
+          file_key: 'file_v3_pdf',
+          file_name: 'report.pdf',
+        }),
       }),
     );
 
@@ -762,7 +772,10 @@ describe('FeishuChannel file attachment pipeline', () => {
     await ch.handleEvent(
       makeEvent({
         msg_type: 'file',
-        content: JSON.stringify({ file_key: 'file_v3_big', file_name: 'huge.txt' }),
+        content: JSON.stringify({
+          file_key: 'file_v3_big',
+          file_name: 'huge.txt',
+        }),
       }),
     );
 
@@ -785,7 +798,10 @@ describe('FeishuChannel file attachment pipeline', () => {
     await ch.handleEvent(
       makeEvent({
         msg_type: 'file',
-        content: JSON.stringify({ file_key: 'file_v3_fail', file_name: 'broken.md' }),
+        content: JSON.stringify({
+          file_key: 'file_v3_fail',
+          file_name: 'broken.md',
+        }),
       }),
     );
 
@@ -802,13 +818,114 @@ describe('FeishuChannel file attachment pipeline', () => {
     await ch.handleEvent(
       makeEvent({
         msg_type: 'file',
-        content: JSON.stringify({ file_key: 'file_v3_noext', file_name: 'Makefile' }),
+        content: JSON.stringify({
+          file_key: 'file_v3_noext',
+          file_name: 'Makefile',
+        }),
       }),
     );
 
     expect(onMessage).toHaveBeenCalledTimes(1);
     const msg = onMessage.mock.calls[0][1];
     expect(msg.content).toContain('plain text content');
+  });
+
+  it('reply to file message → fetches parent and inlines file content', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = {
+      ...makeClientMock(),
+      request: vi.fn(async (opts: any) => {
+        if (opts.url?.includes('/resources/')) {
+          return Buffer.from('# OpenSpec\n\nThis is the spec content.');
+        }
+        if (opts.url?.includes('/messages/om_parent_file')) {
+          return {
+            data: {
+              items: [
+                {
+                  message_id: 'om_parent_file',
+                  msg_type: 'file',
+                  body: {
+                    content: JSON.stringify({
+                      file_key: 'file_v3_parent',
+                      file_name: 'openspec.md',
+                    }),
+                  },
+                },
+              ],
+            },
+          };
+        }
+        return {};
+      }),
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        text: '能看到这个md文档吗',
+        parent_id: 'om_parent_file',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('openspec.md');
+    expect(msg.content).toContain('# OpenSpec');
+    expect(msg.content).toContain('能看到这个md文档吗');
+  });
+
+  it('reply to non-file message → no file inlined, normal text delivery', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = {
+      ...makeClientMock(),
+      request: vi.fn(async () => ({
+        data: {
+          items: [
+            {
+              message_id: 'om_parent_text',
+              msg_type: 'text',
+              body: { content: JSON.stringify({ text: 'original msg' }) },
+            },
+          ],
+        },
+      })),
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        text: 'replying to text',
+        parent_id: 'om_parent_text',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toBe('replying to text');
+    expect(msg.content).not.toContain('---📎');
+  });
+
+  it('reply to file message but fetch fails → delivers text only, no crash', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.client = {
+      ...makeClientMock(),
+      request: vi.fn(async () => {
+        throw new Error('API error');
+      }),
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        text: 'can you see this?',
+        parent_id: 'om_parent_broken',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toBe('can you see this?');
   });
 });
 
