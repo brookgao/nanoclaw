@@ -69,6 +69,9 @@ interface CardSession {
   debounceTimer?: ReturnType<typeof setTimeout>;
   heartbeatTimer?: ReturnType<typeof setInterval>;
   pendingPatch: boolean;
+  // When false, buildCard omits the tool-calls section and tokenFooter.
+  // Sourced from RegisteredGroup.containerConfig.cardVerbose at session creation.
+  verbose: boolean;
 }
 
 function _formatToolEntry(ev: ToolEvent): string {
@@ -188,33 +191,37 @@ function buildCard(session: CardSession): object {
 
   const elements: object[] = [
     { tag: 'markdown', content: `**任务**\n> ${promptPreview}` },
-    { tag: 'hr' },
   ];
 
-  const tools = session.toolEvents;
-  if (tools.length === 0) {
-    elements.push({ tag: 'markdown', content: '**工具调用**\n_（暂无）_' });
-  } else if (isFinal) {
-    // Completed: one-line summary grouped by tool type
-    const groups = new Map<string, number>();
-    for (const e of tools) {
-      const n = e.tool || 'unknown';
-      groups.set(n, (groups.get(n) || 0) + 1);
+  // Concise mode (default): skip tool-calls section + tokenFooter.
+  // Verbose mode (containerConfig.cardVerbose=true): show full progress detail.
+  if (session.verbose) {
+    elements.push({ tag: 'hr' });
+    const tools = session.toolEvents;
+    if (tools.length === 0) {
+      elements.push({ tag: 'markdown', content: '**工具调用**\n_（暂无）_' });
+    } else if (isFinal) {
+      // Completed: one-line summary grouped by tool type
+      const groups = new Map<string, number>();
+      for (const e of tools) {
+        const n = e.tool || 'unknown';
+        groups.set(n, (groups.get(n) || 0) + 1);
+      }
+      const summary = Array.from(groups.entries())
+        .map(([n, c]) => (c > 1 ? `${n} ×${c}` : n))
+        .join(', ');
+      elements.push({
+        tag: 'markdown',
+        content: `**工具调用** (共 ${tools.length} 个): ${summary}`,
+      });
+    } else {
+      // Running: compact one-line entries so user sees live progress
+      const toolLines = tools.map((ev) => _formatToolEntry(ev)).join('\n');
+      elements.push({
+        tag: 'markdown',
+        content: `**工具调用** (共 ${tools.length} 个)\n${toolLines}`,
+      });
     }
-    const summary = Array.from(groups.entries())
-      .map(([n, c]) => (c > 1 ? `${n} ×${c}` : n))
-      .join(', ');
-    elements.push({
-      tag: 'markdown',
-      content: `**工具调用** (共 ${tools.length} 个): ${summary}`,
-    });
-  } else {
-    // Running: compact one-line entries so user sees live progress
-    const toolLines = tools.map((ev) => _formatToolEntry(ev)).join('\n');
-    elements.push({
-      tag: 'markdown',
-      content: `**工具调用** (共 ${tools.length} 个)\n${toolLines}`,
-    });
   }
 
   if (isFinal) {
@@ -225,11 +232,12 @@ function buildCard(session: CardSession): object {
       const body =
         session.finalText.slice(0, MAX_BODY) +
         (truncated ? '\n\n_[内容过长，已截断]_' : '');
-      const content = session.tokenFooter
-        ? `${body}\n\n${session.tokenFooter}`
-        : body;
+      const content =
+        session.verbose && session.tokenFooter
+          ? `${body}\n\n${session.tokenFooter}`
+          : body;
       elements.push({ tag: 'markdown', content });
-    } else if (session.tokenFooter) {
+    } else if (session.verbose && session.tokenFooter) {
       elements.push({ tag: 'markdown', content: session.tokenFooter });
     }
   }
@@ -1017,6 +1025,9 @@ export class FeishuChannel implements Channel {
       if (existing?.debounceTimer) clearTimeout(existing.debounceTimer);
       if (existing?.heartbeatTimer) clearInterval(existing.heartbeatTimer);
 
+      const verbose =
+        this.opts.registeredGroups()[jid]?.containerConfig?.cardVerbose ??
+        false;
       this.cardSessions.set(jid, {
         runId: event.runId,
         messageId: '', // empty until first tool_use lazy-creates it
@@ -1024,6 +1035,7 @@ export class FeishuChannel implements Channel {
         prompt,
         toolEvents: [],
         pendingPatch: false,
+        verbose,
       });
       return;
     }

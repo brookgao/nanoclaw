@@ -45,6 +45,9 @@ export interface ContainerConfig {
   autoCompactWindow?: number;
   // Whether to append a token-usage footer to outbound replies. Default: true.
   showTokenFooter?: boolean;
+  // Whether interactive card shows tool-call details + tokenFooter. Default: false (concise card).
+  // Set true for dev/debug groups where progress visibility matters.
+  cardVerbose?: boolean;
 }
 
 export interface RegisteredGroup {
