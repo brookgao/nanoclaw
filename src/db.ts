@@ -119,6 +119,13 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add output_format column ('plain' | 'card'; NULL = legacy plain)
+  try {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN output_format TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
   // Add images column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE messages ADD COLUMN images TEXT`);

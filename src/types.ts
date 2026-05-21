@@ -87,6 +87,7 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused' | 'completed';
   created_at: string;
+  output_format?: 'plain' | 'card' | null;
 }
 
 export interface TaskRunLog {
