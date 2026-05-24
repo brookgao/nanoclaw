@@ -1,8 +1,80 @@
 import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+
+/**
+ * Build runtime forbidden-command regexes (synced with container/hooks/nanoclaw-host-guard.sh).
+ * Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.5c
+ */
+function buildForbiddenCommandRegexes(): RegExp[] {
+  const home = os.homedir();
+  const homeDesktop = path.join(home, 'Desktop', 'vibe-coding');
+  const escapedHomeDesktop = homeDesktop.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&',
+  );
+  const escapedWorkspace = '\\/workspace\\/extra\\/vibe-coding';
+  return [
+    // cd / pushd <forbidden>
+    new RegExp(
+      `\\b(cd|pushd)\\s+["']?(${escapedHomeDesktop}|${escapedWorkspace})\\b`,
+    ),
+    // git -C / --git-dir= / --work-tree= <forbidden>
+    new RegExp(
+      `\\bgit\\s+(-C\\s+|--git-dir=|--work-tree=)["']?(${escapedHomeDesktop}|${escapedWorkspace})\\b`,
+    ),
+    // GIT_DIR= / GIT_WORK_TREE= env var
+    new RegExp(
+      `\\bGIT_DIR=["']?(${escapedHomeDesktop}|${escapedWorkspace})\\b`,
+    ),
+    new RegExp(
+      `\\bGIT_WORK_TREE=["']?(${escapedHomeDesktop}|${escapedWorkspace})\\b`,
+    ),
+    // Tilde literal
+    new RegExp(`\\b(cd|pushd)\\s+["']?~/Desktop/vibe-coding\\b`),
+    new RegExp(
+      `\\bgit\\s+(-C\\s+|--git-dir=|--work-tree=)["']?~/Desktop/vibe-coding\\b`,
+    ),
+    // $HOME / ${HOME} literal
+    new RegExp(`\\b(cd|pushd)\\s+["']?\\$\\{?HOME\\}?/Desktop/vibe-coding\\b`),
+    new RegExp(
+      `\\bgit\\s+(-C\\s+|--git-dir=|--work-tree=)["']?\\$\\{?HOME\\}?/Desktop/vibe-coding\\b`,
+    ),
+    // find/xargs indirect
+    new RegExp(
+      `\\b(find|xargs)\\b.*["']?(${escapedHomeDesktop}|${escapedWorkspace})\\b`,
+    ),
+  ];
+}
+
+/**
+ * Assert task.script does not contain commands targeting user's main dev directories.
+ *
+ * Codex C2: task.script runs via execFile('bash', [scriptPath]) BEFORE Claude SDK starts,
+ * so PreToolUse hook never sees it. This pre-spawn check is the only defense for `script`.
+ */
+export function assertSafeScript(script: string | null | undefined): void {
+  if (!script) return;
+  const regexes = buildForbiddenCommandRegexes();
+  for (const re of regexes) {
+    if (re.test(script)) {
+      const match = script.match(re)?.[0] ?? '';
+      throw new Error(
+        `❌ Task script 含禁止路径 (forbidden) — abort。\n` +
+          `script 走 execFile('bash', ...) 绕过 PreToolUse hook，必须 task-scheduler 层挡。\n` +
+          `命中模式: ${re.source}\n` +
+          `命中片段: ${match}\n\n` +
+          `详见 spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.5c`,
+      );
+    }
+  }
+}
+
+
 import {
   ContainerOutput,
   runHostAgent,
@@ -169,6 +241,10 @@ async function runTask(
     }, TASK_CLOSE_DELAY_MS);
   };
 
+  // Safety gate before spawn: validate task.script (bypasses PreToolUse hook).
+  // Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.5c (Codex C2)
+  assertSafeScript(task.script);
+
   try {
     const output = await runHostAgent(
       group,
@@ -181,6 +257,7 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
+        workdir: task.workdir || undefined,
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

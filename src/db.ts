@@ -119,6 +119,14 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add workdir column — task-specific working directory for safety guard
+  // Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.2
+  try {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN workdir TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
   // Add images column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE messages ADD COLUMN images TEXT`);
@@ -457,8 +465,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, workdir)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -472,6 +480,7 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
+    task.workdir || null,
   );
 }
 
@@ -506,6 +515,7 @@ export function updateTask(
       | 'schedule_value'
       | 'next_run'
       | 'status'
+      | 'workdir'
     >
   >,
 ): void {
@@ -535,6 +545,10 @@ export function updateTask(
   if (updates.status !== undefined) {
     fields.push('status = ?');
     values.push(updates.status);
+  }
+  if (updates.workdir !== undefined) {
+    fields.push('workdir = ?');
+    values.push(updates.workdir || null);
   }
 
   if (fields.length === 0) return;
