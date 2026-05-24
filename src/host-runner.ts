@@ -6,6 +6,7 @@ import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 import {
   AGENT_RUNNER_PATH,
@@ -174,7 +175,9 @@ export function assertSafeWorkdir(workdir: string | undefined): void {
   }
 }
 
-// Hook script path — __dirname is dist/, ../container/hooks/ relative to source root
+// Hook script path — ESM-safe: derive dist/ dir from import.meta.url (nanoclaw is "type": "module")
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const NANOCLAW_HOST_GUARD_PATH = path.resolve(
   __dirname,
   '..',
