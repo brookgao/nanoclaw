@@ -36,6 +36,13 @@ export interface ContainerInput {
   assistantName?: string;
   script?: string;
   images?: ImageAttachment[];
+  /**
+   * Task-specific **expected** workdir (forwarded from ScheduledTask.workdir).
+   * Validated by assertSafeWorkdir() before spawn — used **only** as a safety check.
+   * The agent process itself still launches with cwd=GROUP_DIR (no change to runtime cwd).
+   * Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.5b
+   */
+  workdir?: string;
 }
 
 export interface TokenUsage {
@@ -118,39 +125,154 @@ function syncSkills(group: RegisteredGroup): void {
 }
 
 /**
- * Ensure the group's .claude/settings.json exists with the required SDK env vars.
+ * Forbidden workdir base paths — runtime-constructed (not hardcoded per-user).
+ * Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.3
+ *
+ * Returned paths have NO trailing separator; matching uses `startsWith(prefix + sep)`
+ * OR equality (Codex Phase 6 M4: precise root like `~/Desktop/vibe-coding` must also be denied).
  */
-function ensureGroupClaudeSettings(group: RegisteredGroup): void {
-  const groupSessionsDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    '.claude',
-  );
-  fs.mkdirSync(groupSessionsDir, { recursive: true });
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
+function buildForbiddenWorkdirBases(): string[] {
+  const home = os.homedir();
+  return [
+    path.join(home, 'Desktop', 'vibe-coding'),
+    '/workspace/extra/vibe-coding',
+  ];
+}
+
+/**
+ * Normalize workdir: expand leading ~ and $HOME / ${HOME} literal, then path.resolve.
+ */
+function normalizeWorkdir(workdir: string): string {
+  const home = os.homedir();
+  let expanded = workdir.replace(/^~(?=$|\/)/, home);
+  // Expand both $HOME and ${HOME} literal (Codex Phase 6 M4)
+  expanded = expanded.replace(/^\$HOME(?=$|\/)/, home);
+  expanded = expanded.replace(/^\$\{HOME\}(?=$|\/)/, home);
+  return path.resolve(expanded);
+}
+
+/**
+ * Assert task workdir is not in a forbidden user main-dev directory.
+ * Throws if workdir == base OR startsWith(base + sep); no-op for undefined (backward compat).
+ *
+ * Backstop is L3 PreToolUse hook (catches old tasks without workdir field).
+ */
+export function assertSafeWorkdir(workdir: string | undefined): void {
+  if (!workdir) return;
+  const normalized = normalizeWorkdir(workdir);
+  for (const base of buildForbiddenWorkdirBases()) {
+    if (normalized === base || normalized.startsWith(base + path.sep)) {
+      throw new Error(
+        `❌ Task workdir 在用户主开发目录 (${normalized}) — 禁止。\n` +
+          `可能撞 in-progress 工作（2026-05-22 事故）。\n\n` +
+          `改用 nanoclaw 专属 worktree，例如：\n` +
+          `  cd <repo-root> && git worktree add ~/nanoclaw-worktrees/<name> <branch>\n` +
+          `然后把任务 workdir 设为 ~/nanoclaw-worktrees/<name>\n\n` +
+          `详见 spec: docs/specs/2026-05-24-task-workdir-safety-guard.md`,
+      );
+    }
+  }
+}
+
+// Hook script path — __dirname is dist/, ../container/hooks/ relative to source root
+const NANOCLAW_HOST_GUARD_PATH = path.resolve(
+  __dirname,
+  '..',
+  'container',
+  'hooks',
+  'nanoclaw-host-guard.sh',
+);
+
+const NANOCLAW_GUARD_HOOK = {
+  matcher: 'Bash',
+  hooks: [
+    {
+      type: 'command' as const,
+      command: `bash ${NANOCLAW_HOST_GUARD_PATH}`,
+      timeout: 5,
+    },
+  ],
+};
+
+function hasNanoclawGuard(preToolUse: unknown[]): boolean {
+  return preToolUse.some((entry) => {
+    const hooks = (entry as { hooks?: { command?: string }[] }).hooks;
+    return (
+      Array.isArray(hooks) &&
+      hooks.some(
+        (h) =>
+          typeof h.command === 'string' &&
+          h.command.includes('nanoclaw-host-guard.sh'),
+      )
+    );
+  });
+}
+
+/**
+ * Ensure the group's .claude/settings.json exists at the location Claude SDK
+ * actually reads from: `groups/<folder>/.claude/settings.json`.
+ *
+ * Codex C1 fix: SDK uses cwd=GROUPS_DIR/<folder> + settingSources=['project','user'].
+ * Previously this function wrote to DATA_DIR/sessions/<folder>/.claude/ — dead code
+ * (no caller, no SDK read). env fields were never loaded.
+ *
+ * Now also injects PreToolUse hook for nanoclaw-host-guard.sh (idempotent).
+ * Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.5
+ */
+export function ensureGroupClaudeSettings(group: RegisteredGroup): void {
+  // Test override: NANOCLAW_GROUPS_DIR — allows unit tests with tmpdir
+  const groupsBase = process.env.NANOCLAW_GROUPS_DIR ?? GROUPS_DIR;
+  const groupClaudeDir = path.join(groupsBase, group.folder, '.claude');
+  fs.mkdirSync(groupClaudeDir, { recursive: true });
+  const settingsFile = path.join(groupClaudeDir, 'settings.json');
+
+  const defaultEnv = {
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+  };
+
   if (!fs.existsSync(settingsFile)) {
+    // Case A: fresh — write default with hooks
     fs.writeFileSync(
       settingsFile,
       JSON.stringify(
         {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-          },
+          env: defaultEnv,
+          hooks: { PreToolUse: [NANOCLAW_GUARD_HOOK] },
         },
         null,
         2,
       ) + '\n',
     );
+    return;
   }
+
+  // Case B: exists — read, merge hooks (explicit array concat, idempotent)
+  let existing: Record<string, unknown>;
+  try {
+    existing = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+  } catch {
+    existing = { env: defaultEnv };
+  }
+  // Defensive: hooks may be corrupted (null / array / primitive) — repair to {}
+  if (
+    existing.hooks == null ||
+    typeof existing.hooks !== 'object' ||
+    Array.isArray(existing.hooks)
+  ) {
+    existing.hooks = {};
+  }
+  const hooksObj = existing.hooks as Record<string, unknown>;
+  const existingPreToolUseRaw = hooksObj.PreToolUse;
+  const existingPreToolUse: unknown[] = Array.isArray(existingPreToolUseRaw)
+    ? existingPreToolUseRaw
+    : [];
+  if (!hasNanoclawGuard(existingPreToolUse)) {
+    hooksObj.PreToolUse = [...existingPreToolUse, NANOCLAW_GUARD_HOOK];
+    fs.writeFileSync(settingsFile, JSON.stringify(existing, null, 2) + '\n');
+  }
+  // Already contains nanoclaw-host-guard — idempotent skip
 }
 
 /**
@@ -317,6 +439,10 @@ export async function runHostAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+  // Safety gate: refuse if task.workdir targets user main dev dir (no-op for undefined).
+  // Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.5b
+  assertSafeWorkdir(input.workdir);
+
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 

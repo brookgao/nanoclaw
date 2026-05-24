@@ -87,6 +87,13 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused' | 'completed';
   created_at: string;
+  output_format?: 'plain' | 'card' | null;
+  /**
+   * Task-specific workdir. host-runner.assertSafeWorkdir() validates it before spawn.
+   * Old tasks without this field rely on L3 PreToolUse hook for runtime protection.
+   * Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md
+   */
+  workdir?: string | null;
 }
 
 export interface TaskRunLog {
