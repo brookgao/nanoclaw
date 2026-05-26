@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { getChannelFactory } from './registry.js';
-import { parseInbound } from './feishu.js';
+import { parseInbound, formatQuotedParent } from './feishu.js';
 import {
   _initTestDatabase,
   _closeDatabase,
@@ -875,7 +875,7 @@ describe('FeishuChannel file attachment pipeline', () => {
     expect(msg.content).toContain('能看到这个md文档吗');
   });
 
-  it('reply to non-file message → no file inlined, normal text delivery', async () => {
+  it('reply to non-file message → no file inlined, quoted text appended for context', async () => {
     const onMessage = vi.fn();
     const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
     ch.client = {
@@ -902,7 +902,8 @@ describe('FeishuChannel file attachment pipeline', () => {
 
     expect(onMessage).toHaveBeenCalledTimes(1);
     const msg = onMessage.mock.calls[0][1];
-    expect(msg.content).toBe('replying to text');
+    expect(msg.content).toContain('replying to text');
+    expect(msg.content).toContain('original msg');
     expect(msg.content).not.toContain('---📎');
   });
 
@@ -1328,5 +1329,176 @@ describe('card session DB persistence', () => {
     expect(getActiveCards()).toHaveLength(0);
 
     restoreEnv(origEnv);
+  });
+});
+
+describe('formatQuotedParent', () => {
+  it('formats a quoted text parent', () => {
+    const block = formatQuotedParent(
+      {
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: '这是被引用的原话' }) },
+      },
+      '司城(West)',
+      'ou_bot',
+    );
+    expect(block).toContain('引用 @司城(West)');
+    expect(block).toContain('这是被引用的原话');
+  });
+
+  it('formats a quoted post (rich text)', () => {
+    const post = JSON.stringify({
+      title: '',
+      content: [[{ tag: 'text', text: 'hello from post' }]],
+    });
+    const block = formatQuotedParent(
+      { msg_type: 'post', body: { content: post } },
+      '建波(Bobo)',
+      'ou_bot',
+    );
+    expect(block).toContain('hello from post');
+    expect(block).toContain('@建波(Bobo)');
+  });
+
+  it('falls back to raw content for share_chat / wiki cards parseInbound cannot decode', () => {
+    // share_chat is a non-text/post/image/file type — parseInbound returns null,
+    // but we still need to surface SOMETHING so the agent can read the doc token.
+    const block = formatQuotedParent(
+      {
+        msg_type: 'share_chat',
+        body: {
+          content: JSON.stringify({
+            chat_id: 'oc_xxx',
+            doc_token: 'wikcnS5TILyCyZfooGg2DOsjtIg',
+          }),
+        },
+      },
+      '司城(West)',
+      'ou_bot',
+    );
+    expect(block).toContain('share_chat');
+    expect(block).toContain('wikcnS5TILyCyZfooGg2DOsjtIg');
+  });
+
+  it('truncates very long parent content', () => {
+    const longText = 'a'.repeat(2000);
+    const block = formatQuotedParent(
+      {
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: longText }) },
+      },
+      'someone',
+      'ou_bot',
+      100,
+    );
+    expect(block.length).toBeLessThan(250);
+    expect(block).toContain('…');
+  });
+
+  it('returns empty string when parent is null/undefined', () => {
+    expect(formatQuotedParent(null as any, 'x', 'ou_bot')).toBe('');
+    expect(formatQuotedParent(undefined as any, 'x', 'ou_bot')).toBe('');
+  });
+
+  it('omits sender label when sender name is empty', () => {
+    const block = formatQuotedParent(
+      {
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: 'orphaned' }) },
+      },
+      '',
+      'ou_bot',
+    );
+    expect(block).toContain('orphaned');
+    expect(block).not.toContain('@');
+  });
+});
+
+describe('FeishuChannel inbound with quoted parent', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  it('appends quoted text parent into delivered content (the recruit standup case)', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+
+    // Mock REST: parent message lookup + sender name resolution.
+    ch.client = {
+      request: vi.fn().mockImplementation(async (req: any) => {
+        if (req.url?.includes('/im/v1/messages/om_parent')) {
+          return {
+            data: {
+              items: [
+                {
+                  msg_type: 'text',
+                  body: {
+                    content: JSON.stringify({
+                      text: '@沈书颉(Ruby) 中午站会的会议文字记录得发一下',
+                    }),
+                  },
+                  sender: { id: 'ou_west' },
+                },
+              ],
+            },
+          };
+        }
+        // Sender name resolution fallback
+        if (req.url?.includes('/contact/v3/users/')) {
+          return { data: { user: { name: '司城(West)' } } };
+        }
+        return { data: {} };
+      }),
+      im: {
+        messageReaction: { create: vi.fn().mockResolvedValue({}) },
+      },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        chat_id: 'oc_recruit',
+        chat_type: 'group',
+        text: '@_user_1 这是5月26日的项目站会，你读一下文档',
+        parent_id: 'om_parent',
+        mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }],
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const [, msg] = onMessage.mock.calls[0];
+    expect(msg.content).toContain('这是5月26日的项目站会');
+    // The quoted parent content must be in the prompt so the agent sees the doc reference
+    expect(msg.content).toContain('中午站会的会议文字记录');
+    expect(msg.reply_to_message_id).toBe('om_parent');
+    expect(msg.reply_to_message_content).toContain('中午站会的会议文字记录');
+  });
+
+  it('still works when parent fetch fails (no crash, no quoted block)', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.client = {
+      request: vi.fn().mockRejectedValue(new Error('403')),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        chat_id: 'oc_recruit2',
+        chat_type: 'group',
+        text: '@_user_1 question',
+        parent_id: 'om_gone',
+        mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }],
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const [, msg] = onMessage.mock.calls[0];
+    expect(msg.content).toBe('question');
+    // reply_to fields left empty on fetch failure
+    expect(msg.reply_to_message_id).toBeUndefined();
   });
 });

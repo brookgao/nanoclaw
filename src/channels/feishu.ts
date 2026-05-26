@@ -434,6 +434,53 @@ export function parseInbound(
   return { text, imageKeys: truncatedKeys, botMentioned };
 }
 
+// Format a quoted parent message into a human-readable block we append to the
+// child message's text. Used to surface "the message you replied to" into the
+// prompt, so the agent sees the doc card / quoted text / etc. that the user
+// is referring to.
+export function formatQuotedParent(
+  parent:
+    | {
+        msg_type?: string;
+        body?: { content?: string };
+        mentions?: FeishuMention[];
+      }
+    | null
+    | undefined,
+  parentSenderName: string,
+  botOpenId: string | null,
+  maxLen: number = 500,
+): string {
+  if (!parent) return '';
+  const msgType = parent.msg_type ?? '';
+  const rawContent = parent.body?.content ?? '';
+
+  // Try the structured parser first for types we already understand.
+  const parsed = parseInbound(
+    {
+      message_type: msgType,
+      content: rawContent,
+      mentions: parent.mentions ?? [],
+    },
+    botOpenId,
+  );
+
+  let inner: string;
+  if (parsed && parsed.text) {
+    inner = parsed.text;
+  } else {
+    // share_chat / wiki / interactive / system / etc — surface the raw content
+    // so the agent can find tokens, URLs, doc IDs without us having to know
+    // every flavor of feishu card.
+    inner = `(${msgType}) ${rawContent}`;
+  }
+
+  if (inner.length > maxLen) inner = inner.slice(0, maxLen) + '…';
+
+  const label = parentSenderName ? `引用 @${parentSenderName} 的消息: ` : '引用: ';
+  return `\n\n[${label}${inner}]`;
+}
+
 function buildFailureMessage(
   failures: Array<{ key: string; reason: FailReason }>,
   totalImageCount: number,
@@ -643,29 +690,76 @@ export class FeishuChannel implements Channel {
       this.reactAck(m.message_id); // 👀 for pure-text path (existing behavior preserved)
     }
 
-    // 7) Resolve file info: from direct file message or from replied parent
+    // 7) Resolve parent message: handle replied-to context (text/wiki cards)
+    //    AND file attachments shared via reply. Fetched once for both paths.
     let fileKey = parsed.fileKey;
     let fileName = parsed.fileName;
     let fileMessageId = m.message_id;
-    if (!fileKey && m.parent_id) {
+    let replyToInfo:
+      | { messageId: string; content: string; senderName: string }
+      | undefined;
+
+    if (m.parent_id) {
       try {
         const parentRes: any = await this.client.request({
           method: 'GET',
           url: `/open-apis/im/v1/messages/${m.parent_id}`,
         });
         const parentMsg = parentRes?.data?.items?.[0];
-        if (parentMsg?.msg_type === 'file' && parentMsg?.body?.content) {
-          const pc = JSON.parse(parentMsg.body.content);
-          if (pc.file_key) {
-            fileKey = pc.file_key;
-            fileName = pc.file_name ?? 'unknown';
-            fileMessageId = m.parent_id;
+        if (parentMsg) {
+          // File path (preserved): pull file_key from a replied-to file message.
+          if (
+            !fileKey &&
+            parentMsg.msg_type === 'file' &&
+            parentMsg.body?.content
+          ) {
+            const pc = JSON.parse(parentMsg.body.content);
+            if (pc.file_key) {
+              fileKey = pc.file_key;
+              fileName = pc.file_name ?? 'unknown';
+              fileMessageId = m.parent_id;
+            }
+          }
+
+          // Non-file parents: surface quoted content (text / post / wiki card /
+          // share_chat / etc.) so the agent sees what the user is referring to.
+          if (parentMsg.msg_type !== 'file') {
+            const parentSenderId = parentMsg.sender?.id ?? '';
+            const parentSenderName = parentSenderId
+              ? await this.resolveSenderName(parentSenderId).catch(
+                  () => parentSenderId,
+                )
+              : '';
+            const block = formatQuotedParent(
+              parentMsg,
+              parentSenderName,
+              this.botOpenId,
+            );
+            if (block) {
+              cleanedText += block;
+              const innerParsed = parseInbound(
+                {
+                  message_type: parentMsg.msg_type ?? '',
+                  content: parentMsg.body?.content ?? '',
+                  mentions: parentMsg.mentions ?? [],
+                },
+                this.botOpenId,
+              );
+              const innerText =
+                innerParsed?.text ||
+                `(${parentMsg.msg_type ?? 'unknown'}) ${parentMsg.body?.content ?? ''}`;
+              replyToInfo = {
+                messageId: m.parent_id,
+                content: innerText,
+                senderName: parentSenderName,
+              };
+            }
           }
         }
       } catch (err) {
         logger.debug(
           { err: (err as Error).message, parentId: m.parent_id },
-          '[feishu] failed to fetch parent message, skipping file extraction',
+          '[feishu] failed to fetch parent message',
         );
       }
     }
@@ -723,6 +817,7 @@ export class FeishuChannel implements Channel {
       payload.header?.create_time,
       chatType !== 'p2p',
       attachments,
+      replyToInfo,
     );
   }
 
@@ -735,6 +830,7 @@ export class FeishuChannel implements Channel {
     createTime: string | undefined,
     isGroup: boolean,
     images: ImageAttachment[] = [],
+    replyTo?: { messageId: string; content: string; senderName: string },
   ): void {
     const jid = `${JID_PREFIX}${chatId}`;
     const ts = createTime
@@ -749,6 +845,9 @@ export class FeishuChannel implements Channel {
       content,
       timestamp: ts,
       images: images.length > 0 ? images : undefined,
+      reply_to_message_id: replyTo?.messageId,
+      reply_to_message_content: replyTo?.content,
+      reply_to_sender_name: replyTo?.senderName,
     };
     this.opts.onMessage(jid, msg);
   }
