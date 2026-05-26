@@ -45,6 +45,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { isStaleSessionError } from './stale-session.js';
 import { startIpcWatcher } from './ipc.js';
 import { handleCreateTopicGroup } from './ipc-sync-handlers.js';
 import { getLatestUserSenderForChat } from './db.js';
@@ -480,15 +481,10 @@ async function runAgent(
 
     if (output.status === 'error') {
       // Detect stale/corrupt session — clear it so the next retry starts fresh.
-      // The session .jsonl can go missing after a crash mid-write, manual
-      // deletion, or disk-full. The existing backoff in group-queue.ts
-      // handles the retry; we just need to remove the broken session ID.
+      // Without this, a broken session id loops forever through group-queue
+      // backoff until max retries drops the message.
       const isStaleSession =
-        sessionId &&
-        output.error &&
-        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
-          output.error,
-        );
+        sessionId && output.error && isStaleSessionError(output.error);
 
       if (isStaleSession) {
         logger.warn(
