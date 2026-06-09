@@ -1501,16 +1501,25 @@ describe('FeishuChannel zombie cleanup', () => {
   it('startZombieSweep registers a timer; stopZombieSweep clears it', async () => {
     const ch = makeChannel();
 
+    // Spy on setInterval to prove idempotency by *call count*, not just by
+    // checking the timer reference (reviewer feedback: ref check alone would
+    // pass even if a second timer were spawned and leaked).
+    const setIntervalSpy = vi.spyOn(global, 'setInterval');
+
     expect(ch.zombieSweepTimer).toBeUndefined();
     ch.startZombieSweep();
     expect(ch.zombieSweepTimer).toBeDefined();
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
 
-    // Calling start twice is idempotent (does not create a second timer)
+    // Second call must NOT spawn a second timer
     const firstRef = ch.zombieSweepTimer;
     ch.startZombieSweep();
     expect(ch.zombieSweepTimer).toBe(firstRef);
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
 
     ch.stopZombieSweep();
     expect(ch.zombieSweepTimer).toBeUndefined();
+
+    setIntervalSpy.mockRestore();
   });
 });

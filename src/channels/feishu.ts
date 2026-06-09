@@ -1208,7 +1208,9 @@ export class FeishuChannel implements Channel {
   }
 
   async cleanupStaleCards(): Promise<void> {
-    const staleCards = getActiveCards();
+    const staleCards = getActiveCards().filter((c) =>
+      c.jid.startsWith(JID_PREFIX),
+    );
     if (staleCards.length === 0) return;
 
     for (const card of staleCards) {
@@ -1320,8 +1322,11 @@ export class FeishuChannel implements Channel {
             '[feishu] interrupted card patch failed on shutdown',
           );
         }
-        deleteActiveCard(jid);
       }
+      // Always drop the DB row, even for sessions that never created a card
+      // (zero-tool runs interrupted mid-flight, etc.). Otherwise the row
+      // leaks past shutdown.
+      deleteActiveCard(jid);
     }
     this.cardSessions.clear();
 
