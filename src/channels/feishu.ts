@@ -8,6 +8,10 @@ import { stripInternalTags } from '../router.js';
 import { TokenUsage, formatTokenFooter } from '../token-footer.js';
 import { insertActiveCard, deleteActiveCard, getActiveCards } from '../db.js';
 import {
+  ZOMBIE_SWEEP_INTERVAL_MS,
+  ZOMBIE_CARD_THRESHOLD_MS,
+} from '../config.js';
+import {
   processImageKeys,
   type FailReason,
   type ImageAttachment,
@@ -471,6 +475,7 @@ export class FeishuChannel implements Channel {
 
   // Interactive card sessions: one card per active agent run per chat
   private cardSessions = new Map<string, CardSession>();
+  private zombieSweepTimer?: NodeJS.Timeout;
   private readonly CARD_DEBOUNCE_MS = 500;
 
   // Cache open_id → display name to avoid repeated API calls
@@ -1115,6 +1120,36 @@ export class FeishuChannel implements Channel {
     }
   }
 
+  async onSessionEnded(jid: string): Promise<void> {
+    const session = this.cardSessions.get(jid);
+    if (!session) {
+      // No live session — either zero-tool run (already cleaned), or the
+      // `final` event already ran the normal cleanup path. Nothing to do.
+      return;
+    }
+
+    if (session.messageId) {
+      try {
+        const card = buildInterruptedCard(session);
+        await this.client.im.message.patch({
+          path: { message_id: session.messageId },
+          data: { content: JSON.stringify(card) },
+        });
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message, jid, messageId: session.messageId },
+          '[feishu] interrupted card patch failed in onSessionEnded',
+        );
+      }
+    }
+
+    if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
+    if (session.debounceTimer) clearTimeout(session.debounceTimer);
+    this.cardSessions.delete(jid);
+    deleteActiveCard(jid);
+    logger.info({ jid }, '[feishu] session force-ended (onSessionEnded)');
+  }
+
   private async createCard(
     jid: string,
     chatId: string,
@@ -1206,7 +1241,69 @@ export class FeishuChannel implements Channel {
     );
   }
 
+  async sweepZombieCards(): Promise<void> {
+    const now = Date.now();
+    const zombies = getActiveCards().filter(
+      (c) =>
+        c.jid.startsWith(JID_PREFIX) &&
+        !this.cardSessions.has(c.jid) &&
+        now - c.started_at > ZOMBIE_CARD_THRESHOLD_MS,
+    );
+
+    if (zombies.length === 0) return;
+
+    for (const card of zombies) {
+      const interruptedCard = buildInterruptedCard({
+        prompt: card.prompt ?? '',
+        startedAt: card.started_at,
+        toolEvents: [],
+      });
+      try {
+        await this.client.im.message.patch({
+          path: { message_id: card.message_id },
+          data: { content: JSON.stringify(interruptedCard) },
+        });
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message, jid: card.jid },
+          '[feishu] zombie sweep patch failed',
+        );
+      }
+      deleteActiveCard(card.jid);
+    }
+
+    logger.info(
+      { count: zombies.length },
+      '[feishu] zombie sweep cleaned stale cards',
+    );
+  }
+
+  startZombieSweep(): void {
+    if (this.zombieSweepTimer) return;
+    if (ZOMBIE_SWEEP_INTERVAL_MS <= 0) return;
+    this.zombieSweepTimer = setInterval(() => {
+      this.sweepZombieCards().catch((err) =>
+        logger.warn(
+          { err: (err as Error).message },
+          '[feishu] zombie sweep tick error',
+        ),
+      );
+    }, ZOMBIE_SWEEP_INTERVAL_MS);
+    logger.info(
+      { intervalMs: ZOMBIE_SWEEP_INTERVAL_MS },
+      '[feishu] zombie sweep timer started',
+    );
+  }
+
+  stopZombieSweep(): void {
+    if (this.zombieSweepTimer) {
+      clearInterval(this.zombieSweepTimer);
+      this.zombieSweepTimer = undefined;
+    }
+  }
+
   async disconnect(): Promise<void> {
+    this.stopZombieSweep();
     for (const [jid, session] of this.cardSessions) {
       if (session.debounceTimer) clearTimeout(session.debounceTimer);
       if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);

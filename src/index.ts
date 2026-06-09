@@ -457,59 +457,81 @@ async function runAgent(
     : undefined;
 
   try {
-    const output = await runHostAgent(
-      group,
-      {
-        prompt,
-        sessionId,
-        groupFolder: group.folder,
-        chatJid,
-        isMain,
-        assistantName: ASSISTANT_NAME,
-        images,
-      },
-      (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
-      wrappedOnOutput,
-    );
+    try {
+      const output = await runHostAgent(
+        group,
+        {
+          prompt,
+          sessionId,
+          groupFolder: group.folder,
+          chatJid,
+          isMain,
+          assistantName: ASSISTANT_NAME,
+          images,
+        },
+        (proc, containerName) =>
+          queue.registerProcess(chatJid, proc, containerName, group.folder),
+        wrappedOnOutput,
+      );
 
-    if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
-    }
-
-    if (output.status === 'error') {
-      // Detect stale/corrupt session — clear it so the next retry starts fresh.
-      // The session .jsonl can go missing after a crash mid-write, manual
-      // deletion, or disk-full. The existing backoff in group-queue.ts
-      // handles the retry; we just need to remove the broken session ID.
-      const isStaleSession =
-        sessionId &&
-        output.error &&
-        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
-          output.error,
-        );
-
-      if (isStaleSession) {
-        logger.warn(
-          { group: group.name, staleSessionId: sessionId, error: output.error },
-          'Stale session detected — clearing for next retry',
-        );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
+      if (output.newSessionId) {
+        sessions[group.folder] = output.newSessionId;
+        setSession(group.folder, output.newSessionId);
       }
 
-      logger.error(
-        { group: group.name, error: output.error },
-        'Container agent error',
-      );
+      if (output.status === 'error') {
+        // Detect stale/corrupt session — clear it so the next retry starts fresh.
+        // The session .jsonl can go missing after a crash mid-write, manual
+        // deletion, or disk-full. The existing backoff in group-queue.ts
+        // handles the retry; we just need to remove the broken session ID.
+        const isStaleSession =
+          sessionId &&
+          output.error &&
+          /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
+            output.error,
+          );
+
+        if (isStaleSession) {
+          logger.warn(
+            {
+              group: group.name,
+              staleSessionId: sessionId,
+              error: output.error,
+            },
+            'Stale session detected — clearing for next retry',
+          );
+          delete sessions[group.folder];
+          deleteSession(group.folder);
+        }
+
+        logger.error(
+          { group: group.name, error: output.error },
+          'Container agent error',
+        );
+        return 'error';
+      }
+
+      return 'success';
+    } catch (err) {
+      logger.error({ group: group.name, err }, 'Agent error');
       return 'error';
     }
-
-    return 'success';
-  } catch (err) {
-    logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
+  } finally {
+    // Force-cleanup channel session state (e.g. Feishu cardSessions /
+    // active_cards) for runs that exited without a `final` event — timeouts,
+    // SIGKILL, container crashes. group-queue serializes runAgent per jid, so
+    // any live cardSession[jid] at this point must belong to *this* run.
+    const channel = findChannel(channels, chatJid);
+    if (channel?.onSessionEnded) {
+      try {
+        await channel.onSessionEnded(chatJid);
+      } catch (cleanupErr) {
+        logger.warn(
+          { err: (cleanupErr as Error).message, chatJid },
+          'onSessionEnded cleanup failed',
+        );
+      }
+    }
   }
 }
 
@@ -811,6 +833,7 @@ async function main(): Promise<void> {
 
   if (feishuChannel) {
     await feishuChannel.cleanupStaleCards();
+    feishuChannel.startZombieSweep();
   }
 
   // Start subsystems (independently of connection handler)
