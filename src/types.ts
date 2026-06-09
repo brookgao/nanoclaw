@@ -133,7 +133,7 @@ export interface Channel {
   sendMessage(
     jid: string,
     text: string,
-    options?: { suppressForCard?: boolean },
+    options?: { suppressForCard?: boolean; plainText?: boolean },
   ): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
