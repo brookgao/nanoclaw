@@ -35,7 +35,9 @@ describe('nanoclaw-host-guard hook — deny cases', () => {
     const { stdout } = runHook(
       {
         tool_name: 'Bash',
-        tool_input: { command: 'cd /Users/testuser/Desktop/vibe-coding/nine && ls' },
+        tool_input: {
+          command: 'cd /Users/testuser/Desktop/vibe-coding/nine && ls',
+        },
       },
       { home: TEST_HOME },
     );
@@ -46,7 +48,9 @@ describe('nanoclaw-host-guard hook — deny cases', () => {
     const { stdout } = runHook(
       {
         tool_name: 'Bash',
-        tool_input: { command: 'git -C /Users/testuser/Desktop/vibe-coding/nine status' },
+        tool_input: {
+          command: 'git -C /Users/testuser/Desktop/vibe-coding/nine status',
+        },
       },
       { home: TEST_HOME },
     );
@@ -55,7 +59,10 @@ describe('nanoclaw-host-guard hook — deny cases', () => {
 
   it('denies cd ~/Desktop/vibe-coding/ literal tilde form', () => {
     const { stdout } = runHook(
-      { tool_name: 'Bash', tool_input: { command: 'cd ~/Desktop/vibe-coding/nine' } },
+      {
+        tool_name: 'Bash',
+        tool_input: { command: 'cd ~/Desktop/vibe-coding/nine' },
+      },
       { home: TEST_HOME },
     );
     expect(stdout).toContain('"permissionDecision": "deny"');
@@ -101,7 +108,9 @@ describe('nanoclaw-host-guard hook — deny cases', () => {
     const { stdout } = runHook(
       {
         tool_name: 'Bash',
-        tool_input: { command: "cd '/Users/testuser/Desktop/vibe-coding/nine'" },
+        tool_input: {
+          command: "cd '/Users/testuser/Desktop/vibe-coding/nine'",
+        },
       },
       { home: TEST_HOME },
     );
@@ -207,6 +216,17 @@ describe('nanoclaw-host-guard hook — action bans: push to protected branch', (
     'git --no-pager push origin main',
     // extra whitespace
     'git  push   origin   dev',
+    // force-update refspec +dev (review C2)
+    'git push origin +dev',
+    'git push origin +main',
+    // --mirror / --all push every local ref (review C1)
+    'git push --mirror origin',
+    'git push --all origin',
+    // case-insensitive bypass attempt (review I1)
+    'git push origin DEV',
+    'git push origin Main',
+    // multi-line — grep is line-oriented, line containing push origin dev still matches
+    'git status\ngit push origin dev',
   ];
   for (const cmd of cases) {
     it(`denies: ${cmd}`, () => {
@@ -227,6 +247,10 @@ describe('nanoclaw-host-guard hook — action bans: push to protected branch', (
     'git push origin fix/dev', // protected as path segment
     'echo dev', // protected name in unrelated command
     'touch master.md',
+    // command-position anchor: git inside string literal must NOT trigger (review I2)
+    'echo "see: git push origin dev"',
+    'echo \'usage: git push origin main\'',
+    'cat README.md # mentions git push origin dev',
   ];
   for (const cmd of allowCases) {
     it(`ALLOWS: ${cmd}`, () => {
@@ -247,6 +271,7 @@ describe('nanoclaw-host-guard hook — action bans: force push', () => {
     'git push -fu origin fix/x', // bundled (critic I4)
     'git push -uf origin fix/x', // bundled, different order
     'git -c x=y push --force origin fix/x', // git-prefix bypass (critic C3)
+    'git push --force-with-lease=dev origin fix/x', // ref-scoped lease (review M1)
   ];
   for (const cmd of denyCases) {
     it(`denies: ${cmd}`, () => {
