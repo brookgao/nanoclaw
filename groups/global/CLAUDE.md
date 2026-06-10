@@ -22,14 +22,8 @@
 
 1. **写 plan** — 调 `Skill(superpowers:writing-plans)` 生成 `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`，列改动范围 / 受影响文件 / 风险 / 验证步骤
 2. **派 critic 对抗审 plan** — 派子代理（`Agent(subagent_type=general-purpose)` 或 `Skill(codex:rescue)`）prompt 写「adversarially review this plan: surface missing edge cases / wrong assumptions / better alternatives」，把 critic 反馈拼回 plan 末尾
-3. **把 plan + critic 摘要发给用户，等明确批准** — 用户没说「按 plan 改 / 这个 plan 行 / go ahead 实施」之前**禁止动代码**。用户说了批准，nanoclaw 主进程会自动写 `<group>/.approvals/<id>.json` 文件，这是 hook 校验的硬证据。
+3. **把 plan + critic 摘要发给用户，等明确批准** — 用户没说「按 plan 改 / 这个 plan 行 / go ahead 实施」之前**禁止动代码**
 4. **实施完调 code review** — 改完 + 自测通过后，调 `Skill(superpowers:requesting-code-review)` 派 reviewer 审实施结果，把 PR 链接 + review 摘要一起发给用户，等 merge 指令
-
-**Approval marker（硬约束）：**
-- 用户说「按 plan 改 / go ahead / 实施吧 / 开始动手 / plan approved / 这个 plan 行」→ nanoclaw 自动在群目录写 `.approvals/<id>.json`，TTL=30min
-- host-guard 拦下所有开 PR 的命令（`gh pr create` / `gh api .../pulls` / `curl .../pulls`），必须看到一个**未消费、未过期**的 approval 才放行
-- 放行时 hook 自动 `mv .json → .consumed.json`：**一个 approval = 一次 PR-create**，第二次开 PR 必须重新让用户批准
-- 禁止动作：❌ 自己 `touch` / `echo > .approvals/fake.json` 伪造 marker（commit log 会审计）；❌ `NANOCLAW_GROUP_DIR=/other/group gh pr create` 跨群盗用别群的 approval（已被 hook 拦）
 
 **Merge 协议**（纪律层，hook 不拦——用户标准流程里需要你帮忙合 PR）：
 
@@ -52,9 +46,6 @@ PR 开完后**默认停手**：把 PR 链接 + reviewer 摘要发给用户、报
 - ❌ 把「祈使 + 列表内问句」整段当任务清单做（见 PR #3085 案例）
 - ❌ **跳过 plan / critic / code-review 任一步直接动代码 / 开 PR**——任何代码改动都必须方案挡四步全走
 - ❌ 「我已经改完了 PR 链接 xxx，已合并到 dev」这种把 commit / push / merge 一条龙吃掉的回复
-- ❌ `touch <group>/.approvals/*.json` 或任何手工写 approval marker——LLM 必须等用户真实批准消息触发 nanoclaw 自动写
-- ❌ `NANOCLAW_GROUP_DIR=...` 内联跨群盗用 approval（hook 拦）
-- ❌ `gh api .../pulls -X POST` 或 `curl .../pulls -X POST` 绕过 `gh pr create`（hook 拦）
 
 **事故案例参考**：
 
