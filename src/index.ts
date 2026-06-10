@@ -52,6 +52,7 @@ import { getLatestUserSenderForChat } from './db.js';
 import { FeishuChannel } from './channels/feishu.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { checkDotaDecision } from './dota-bridge.js';
+import { checkApprovalKeywords, writeApproval } from './approval-bridge.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -774,14 +775,17 @@ async function main(): Promise<void> {
         }
       }
 
-      // Sender allowlist drop mode: discard messages from denied senders before storing
+      // Sender allowlist drop mode + approval keyword detection share one
+      // loadSenderAllowlist() call to avoid double YAML parse per message
+      // (reviewer I5).
+      let allowlistCfg: ReturnType<typeof loadSenderAllowlist> | null = null;
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
-        const cfg = loadSenderAllowlist();
+        allowlistCfg = loadSenderAllowlist();
         if (
-          shouldDropMessage(chatJid, cfg) &&
-          !isSenderAllowed(chatJid, msg.sender, cfg)
+          shouldDropMessage(chatJid, allowlistCfg) &&
+          !isSenderAllowed(chatJid, msg.sender, allowlistCfg)
         ) {
-          if (cfg.logDenied) {
+          if (allowlistCfg.logDenied) {
             logger.debug(
               { chatJid, sender: msg.sender },
               'sender-allowlist: dropping message (drop mode)',
@@ -790,7 +794,60 @@ async function main(): Promise<void> {
           return;
         }
       }
+
+      // Store the message FIRST so the matched_message_id in the approval
+      // marker references a real DB row (reviewer I2: previously approval
+      // could persist with a dangling message_id if storeMessage later threw).
       storeMessage(msg);
+
+      // Approval keyword detection — writes <group>/.approvals/<id>.json
+      // so host-guard can validate `gh pr create` / `gh api .../pulls` /
+      // `curl .../pulls`. Defeats LLM skipping the four-step plan/critic
+      // gate (PR #3175-class incident). Only allowed senders can approve
+      // (critic I7: prevents random teammate "按 plan 改" from authorizing
+      // Andy's pending PR).
+      if (
+        chatJid.startsWith('feishu:') &&
+        !msg.is_from_me &&
+        !msg.is_bot_message &&
+        registeredGroups[chatJid]
+      ) {
+        const cfg = allowlistCfg ?? loadSenderAllowlist();
+        const senderIsTrusted = isSenderAllowed(chatJid, msg.sender, cfg);
+        if (senderIsTrusted) {
+          const result = checkApprovalKeywords(
+            msg.content.trim(),
+            msg.reply_to_message_content,
+          );
+          if (result.matched) {
+            try {
+              const groupDir = resolveGroupFolderPath(
+                registeredGroups[chatJid].folder,
+              );
+              const filename = writeApproval(groupDir, {
+                kind: result.kind,
+                matchedText: msg.content.trim(),
+                matchedMessageId: msg.id,
+                matchedSender: msg.sender,
+              });
+              logger.info(
+                {
+                  jid: chatJid,
+                  kind: result.kind,
+                  filename,
+                  sender: msg.sender,
+                },
+                'approval marker written',
+              );
+            } catch (err) {
+              logger.warn(
+                { err: (err as Error).message, jid: chatJid },
+                'approval write failed',
+              );
+            }
+          }
+        }
+      }
     },
     onChatMetadata: (
       chatJid: string,
