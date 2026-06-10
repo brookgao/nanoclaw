@@ -1502,3 +1502,196 @@ describe('FeishuChannel inbound with quoted parent', () => {
     expect(msg.reply_to_message_id).toBeUndefined();
   });
 });
+
+describe('FeishuChannel zombie cleanup', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'test-id';
+    process.env.FEISHU_APP_SECRET = 'test-secret';
+    _initTestDatabase();
+  });
+  afterEach(() => {
+    _closeDatabase();
+    restoreEnv(origEnv);
+  });
+
+  function makeChannel() {
+    const factory = getChannelFactory('feishu')!;
+    const ch = factory(makeOpts())! as any;
+    ch.client = {
+      im: {
+        message: {
+          create: vi
+            .fn()
+            .mockResolvedValue({ data: { message_id: 'om_card_1' } }),
+          patch: vi.fn().mockResolvedValue({}),
+        },
+        messageReaction: { create: vi.fn().mockResolvedValue({}) },
+      },
+    };
+    return ch;
+  }
+
+  it('onSessionEnded clears live cardSession and active_cards row', async () => {
+    const ch = makeChannel();
+    const jid = 'feishu:oc_zombie1';
+
+    ch.cardSessions.set(jid, {
+      runId: 'run-zombie-1',
+      messageId: 'msg-zombie-1',
+      startedAt: Date.now() - 10_000,
+      prompt: 'pretend prompt',
+      toolEvents: [],
+      pendingPatch: false,
+      verbose: false,
+    });
+    insertActiveCard({
+      jid,
+      messageId: 'msg-zombie-1',
+      runId: 'run-zombie-1',
+      startedAt: Date.now() - 10_000,
+      prompt: 'pretend prompt',
+    });
+
+    expect(ch.cardSessions.has(jid)).toBe(true);
+    expect(getActiveCards().some((c) => c.jid === jid)).toBe(true);
+
+    await ch.onSessionEnded(jid);
+
+    expect(ch.cardSessions.has(jid)).toBe(false);
+    expect(getActiveCards().some((c) => c.jid === jid)).toBe(false);
+    expect(ch.client.im.message.patch).toHaveBeenCalledTimes(1);
+  });
+
+  it('onSessionEnded is a no-op when no cardSession exists', async () => {
+    const ch = makeChannel();
+    const jid = 'feishu:oc_nosession';
+
+    await expect(ch.onSessionEnded(jid)).resolves.toBeUndefined();
+    expect(getActiveCards().some((c) => c.jid === jid)).toBe(false);
+    expect(ch.client.im.message.patch).not.toHaveBeenCalled();
+  });
+
+  it('onSessionEnded tolerates patch failure and still cleans state', async () => {
+    const ch = makeChannel();
+    ch.client.im.message.patch = vi
+      .fn()
+      .mockRejectedValue(new Error('message gone'));
+    const jid = 'feishu:oc_patchfail';
+
+    ch.cardSessions.set(jid, {
+      runId: 'run-x',
+      messageId: 'msg-x',
+      startedAt: Date.now() - 1000,
+      prompt: 'p',
+      toolEvents: [],
+      pendingPatch: false,
+      verbose: false,
+    });
+    insertActiveCard({
+      jid,
+      messageId: 'msg-x',
+      runId: 'run-x',
+      startedAt: Date.now() - 1000,
+      prompt: 'p',
+    });
+
+    await ch.onSessionEnded(jid);
+    expect(ch.cardSessions.has(jid)).toBe(false);
+    expect(getActiveCards().some((c) => c.jid === jid)).toBe(false);
+  });
+
+  it('sweepZombieCards cleans only stale + no-session rows; keeps live and recent', async () => {
+    const ch = makeChannel();
+    const NOW = Date.now();
+    const zombieJid = 'feishu:oc_truly_zombie';
+    const liveJid = 'feishu:oc_still_live';
+    const recentJid = 'feishu:oc_recent';
+
+    // Threshold default = max(PROCESS_TIMEOUT=1800000, IDLE_TIMEOUT=1800000) + 60000 = 1_860_000ms
+    const STALE = 1_900_000; // 31.6min — past threshold
+    const RECENT = 5_000; // 5s — well under
+
+    insertActiveCard({
+      jid: zombieJid,
+      messageId: 'm-z',
+      runId: 'r-z',
+      startedAt: NOW - STALE,
+      prompt: 'zombie',
+    });
+    insertActiveCard({
+      jid: liveJid,
+      messageId: 'm-l',
+      runId: 'r-l',
+      startedAt: NOW - STALE,
+      prompt: 'live',
+    });
+    ch.cardSessions.set(liveJid, {
+      runId: 'r-l',
+      messageId: 'm-l',
+      startedAt: NOW - STALE,
+      prompt: 'live',
+      toolEvents: [],
+      pendingPatch: false,
+      verbose: false,
+    });
+    insertActiveCard({
+      jid: recentJid,
+      messageId: 'm-r',
+      runId: 'r-r',
+      startedAt: NOW - RECENT,
+      prompt: 'recent',
+    });
+
+    await ch.sweepZombieCards();
+
+    const remaining = getActiveCards().map((c) => c.jid);
+    expect(remaining).not.toContain(zombieJid);
+    expect(remaining).toContain(liveJid);
+    expect(remaining).toContain(recentJid);
+  });
+
+  it('sweepZombieCards ignores non-feishu jid prefixes', async () => {
+    const ch = makeChannel();
+    const NOW = Date.now();
+    const otherJid = 'telegram:chat_123';
+    insertActiveCard({
+      jid: otherJid,
+      messageId: 'm-tg',
+      runId: 'r-tg',
+      startedAt: NOW - 1_900_000,
+      prompt: 'telegram',
+    });
+
+    await ch.sweepZombieCards();
+
+    // Foreign channel row must be untouched; Feishu sweeper has no business
+    // patching Telegram messages.
+    expect(getActiveCards().some((c) => c.jid === otherJid)).toBe(true);
+    expect(ch.client.im.message.patch).not.toHaveBeenCalled();
+  });
+
+  it('startZombieSweep registers a timer; stopZombieSweep clears it', async () => {
+    const ch = makeChannel();
+
+    // Spy on setInterval to prove idempotency by *call count*, not just by
+    // checking the timer reference (reviewer feedback: ref check alone would
+    // pass even if a second timer were spawned and leaked).
+    const setIntervalSpy = vi.spyOn(global, 'setInterval');
+
+    expect(ch.zombieSweepTimer).toBeUndefined();
+    ch.startZombieSweep();
+    expect(ch.zombieSweepTimer).toBeDefined();
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+
+    // Second call must NOT spawn a second timer
+    const firstRef = ch.zombieSweepTimer;
+    ch.startZombieSweep();
+    expect(ch.zombieSweepTimer).toBe(firstRef);
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+
+    ch.stopZombieSweep();
+    expect(ch.zombieSweepTimer).toBeUndefined();
+
+    setIntervalSpy.mockRestore();
+  });
+});

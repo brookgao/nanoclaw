@@ -133,7 +133,7 @@ export interface Channel {
   sendMessage(
     jid: string,
     text: string,
-    options?: { suppressForCard?: boolean },
+    options?: { suppressForCard?: boolean; plainText?: boolean },
   ): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
@@ -144,6 +144,11 @@ export interface Channel {
   syncGroups?(force: boolean): Promise<void>;
   // Optional: receive agent lifecycle events (tool calls, final result, etc.)
   onAgentEvent?(jid: string, event: AgentEvent): Promise<void>;
+  // Optional: notify the channel that the agent run for this jid has ended
+  // (success or failure, including timeouts/crashes). Channels that hold
+  // per-jid session state (e.g. Feishu cards) use this to force-cleanup when
+  // the SDK didn't get a chance to emit a `final` event.
+  onSessionEnded?(jid: string): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

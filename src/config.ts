@@ -73,6 +73,25 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
 );
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+
+// Periodic sweep for zombie active_cards rows. Default 60s tick — cheap to
+// run, fast enough recovery from runaway/crashed runs. Set to 0 to disable.
+export const ZOMBIE_SWEEP_INTERVAL_MS = parseInt(
+  process.env.ZOMBIE_SWEEP_INTERVAL_MS || '60000',
+  10,
+);
+
+// A card is a zombie when (now - started_at) exceeds this AND no in-memory
+// cardSession exists. Default = max(PROCESS_TIMEOUT, IDLE_TIMEOUT) + 60s.
+// PROCESS_TIMEOUT is the hard-kill ceiling, so any legitimate live run will
+// already be reaped by then; +60s gives the post-close cleanup path a window
+// to run before the sweeper steps in.
+export const ZOMBIE_CARD_THRESHOLD_MS = parseInt(
+  process.env.ZOMBIE_CARD_THRESHOLD_MS ||
+    String(Math.max(PROCESS_TIMEOUT, IDLE_TIMEOUT) + 60_000),
+  10,
+);
+
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
