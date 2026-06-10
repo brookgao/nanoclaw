@@ -53,6 +53,10 @@ import { FeishuChannel } from './channels/feishu.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { checkDotaDecision } from './dota-bridge.js';
 import {
+  checkApprovalKeywords,
+  writeApproval,
+} from './approval-bridge.js';
+import {
   restoreRemoteControl,
   startRemoteControl,
   stopRemoteControl,
@@ -790,6 +794,56 @@ async function main(): Promise<void> {
           return;
         }
       }
+
+      // Approval keyword detection — writes <group>/.approvals/<id>.json
+      // so host-guard can validate `gh pr create` / `gh api .../pulls` /
+      // `curl .../pulls`. Defeats LLM skipping the four-step plan/critic
+      // gate (PR #3175-class incident). Only allowed senders can approve
+      // (critic I7: prevents random teammate "按 plan 改" from authorizing
+      // Andy's pending PR).
+      if (
+        chatJid.startsWith('feishu:') &&
+        !msg.is_from_me &&
+        !msg.is_bot_message &&
+        registeredGroups[chatJid]
+      ) {
+        const cfg = loadSenderAllowlist();
+        const senderIsTrusted = isSenderAllowed(chatJid, msg.sender, cfg);
+        if (senderIsTrusted) {
+          const result = checkApprovalKeywords(
+            msg.content.trim(),
+            msg.reply_to_message_content,
+          );
+          if (result.matched) {
+            try {
+              const groupDir = resolveGroupFolderPath(
+                registeredGroups[chatJid].folder,
+              );
+              const filename = writeApproval(groupDir, {
+                kind: result.kind,
+                matchedText: msg.content.trim(),
+                matchedMessageId: msg.id,
+                matchedSender: msg.sender,
+              });
+              logger.info(
+                {
+                  jid: chatJid,
+                  kind: result.kind,
+                  filename,
+                  sender: msg.sender,
+                },
+                'approval marker written',
+              );
+            } catch (err) {
+              logger.warn(
+                { err: (err as Error).message, jid: chatJid },
+                'approval write failed',
+              );
+            }
+          }
+        }
+      }
+
       storeMessage(msg);
     },
     onChatMetadata: (

@@ -2,9 +2,11 @@
  * Tests for container/hooks/nanoclaw-host-guard.sh PreToolUse hook.
  * Spec: docs/specs/2026-05-24-task-workdir-safety-guard.md §5.4 + §7.2
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'child_process';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 
 const HOOK = path.resolve(
   __dirname,
@@ -19,9 +21,13 @@ const TEST_HOME = '/Users/testuser';
 // 显式传 env 避免测试间脏污（critic R2 M2）
 function runHook(
   input: object,
-  opts: { home?: string } = {},
+  opts: { home?: string; extraEnv?: Record<string, string> } = {},
 ): { stdout: string; status: number } {
-  const childEnv = { ...process.env, HOME: opts.home ?? process.env.HOME };
+  const childEnv: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    HOME: opts.home ?? process.env.HOME ?? '',
+    ...(opts.extraEnv || {}),
+  };
   const r = spawnSync('bash', [HOOK], {
     input: JSON.stringify(input),
     encoding: 'utf-8',
@@ -333,4 +339,170 @@ describe('nanoclaw-host-guard hook — action bans: bypass verify/sign', () => {
       expect(stdout).not.toContain('"permissionDecision": "deny"');
     });
   }
+});
+
+describe('nanoclaw-host-guard hook — D-class: gh pr create approval gate', () => {
+  let tmpGroupDir: string;
+
+  beforeEach(() => {
+    tmpGroupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-approval-'));
+  });
+  afterEach(() => {
+    fs.rmSync(tmpGroupDir, { recursive: true, force: true });
+  });
+
+  function writeFreshApproval(): void {
+    const dir = path.join(tmpGroupDir, '.approvals');
+    fs.mkdirSync(dir, { recursive: true });
+    const now = new Date();
+    const ttl = new Date(now.getTime() + 30 * 60 * 1000);
+    fs.writeFileSync(
+      path.join(dir, 'fresh.json'),
+      JSON.stringify({
+        kind: 'plan',
+        approved_at: now.toISOString(),
+        ttl_until: ttl.toISOString(), // ISO with milliseconds — macOS parse test
+        matched_text: '按 plan 改',
+        matched_message_id: 'om_1',
+        matched_sender: 'ou_user',
+      }),
+    );
+  }
+
+  function writeExpiredApproval(): void {
+    const dir = path.join(tmpGroupDir, '.approvals');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'old.json'),
+      JSON.stringify({
+        kind: 'plan',
+        approved_at: '2020-01-01T00:00:00.000Z',
+        ttl_until: '2020-01-01T00:30:00.000Z',
+      }),
+    );
+  }
+
+  const PR_CREATE_CMDS = [
+    'gh pr create --title x --body y',
+    'gh pr create',
+    'gh api repos/foo/bar/pulls -X POST -f title=x -f head=foo -f base=dev',
+    'gh api repos/foo/bar/pulls --method POST -f title=x',
+    'gh api /repos/foo/bar/pulls -f title=x',
+    'curl -X POST -H "Authorization: token T" https://api.github.com/repos/foo/bar/pulls',
+  ];
+
+  for (const cmd of PR_CREATE_CMDS) {
+    it(`denies "${cmd.slice(0, 50)}..." without approval`, () => {
+      const { stdout } = runHook(
+        { tool_name: 'Bash', tool_input: { command: cmd } },
+        { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: tmpGroupDir } },
+      );
+      expect(stdout).toContain('"permissionDecision": "deny"');
+      expect(stdout).toContain('approval');
+    });
+  }
+
+  it('ALLOWS gh pr create with fresh approval (and consumes marker)', () => {
+    writeFreshApproval();
+    const before = fs
+      .readdirSync(path.join(tmpGroupDir, '.approvals'))
+      .filter((f) => f.endsWith('.json') && !f.endsWith('.consumed.json'));
+    expect(before).toHaveLength(1);
+
+    const { stdout } = runHook(
+      { tool_name: 'Bash', tool_input: { command: 'gh pr create --title x' } },
+      { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: tmpGroupDir } },
+    );
+    expect(stdout).not.toContain('"permissionDecision": "deny"');
+
+    const after = fs.readdirSync(path.join(tmpGroupDir, '.approvals'));
+    expect(after.filter((f) => f.endsWith('.consumed.json'))).toHaveLength(1);
+    expect(
+      after.filter((f) => f.endsWith('.json') && !f.endsWith('.consumed.json')),
+    ).toHaveLength(0);
+  });
+
+  it('SECOND gh pr create after consumption → deny (one approval = one PR)', () => {
+    writeFreshApproval();
+    runHook(
+      { tool_name: 'Bash', tool_input: { command: 'gh pr create --title x' } },
+      { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: tmpGroupDir } },
+    );
+    const { stdout } = runHook(
+      { tool_name: 'Bash', tool_input: { command: 'gh pr create --title x' } },
+      { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: tmpGroupDir } },
+    );
+    expect(stdout).toContain('"permissionDecision": "deny"');
+  });
+
+  it('denies gh pr create with expired approval', () => {
+    writeExpiredApproval();
+    const { stdout } = runHook(
+      { tool_name: 'Bash', tool_input: { command: 'gh pr create' } },
+      { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: tmpGroupDir } },
+    );
+    expect(stdout).toContain('"permissionDecision": "deny"');
+  });
+
+  it('denies inline NANOCLAW_GROUP_DIR= override (critic C1)', () => {
+    const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-other-'));
+    fs.mkdirSync(path.join(otherDir, '.approvals'));
+    fs.writeFileSync(
+      path.join(otherDir, '.approvals', 'fresh.json'),
+      JSON.stringify({
+        kind: 'plan',
+        ttl_until: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      }),
+    );
+    const { stdout } = runHook(
+      {
+        tool_name: 'Bash',
+        tool_input: {
+          command: `NANOCLAW_GROUP_DIR=${otherDir} gh pr create --title x`,
+        },
+      },
+      { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: tmpGroupDir } },
+    );
+    expect(stdout).toContain('"permissionDecision": "deny"');
+    expect(stdout).toContain('NANOCLAW_GROUP_DIR');
+    fs.rmSync(otherDir, { recursive: true, force: true });
+  });
+
+  const NON_GATED_CMDS = [
+    'gh pr view 5',
+    'gh pr list',
+    'gh pr merge 5 --merge',
+    'gh pr edit 5 --add-reviewer foo',
+    'gh issue list',
+    'gh repo view',
+    'curl https://api.github.com/repos/foo/bar',
+    'gh api repos/foo/bar/issues',
+  ];
+  for (const cmd of NON_GATED_CMDS) {
+    it(`ALLOWS non-gated: ${cmd}`, () => {
+      const { stdout } = runHook(
+        { tool_name: 'Bash', tool_input: { command: cmd } },
+        { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: tmpGroupDir } },
+      );
+      expect(stdout).not.toContain('"permissionDecision": "deny"');
+    });
+  }
+
+  it('macOS date parse round-trip (critic C2)', () => {
+    writeFreshApproval();
+    const { stdout } = runHook(
+      { tool_name: 'Bash', tool_input: { command: 'gh pr create' } },
+      { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: tmpGroupDir } },
+    );
+    expect(stdout).not.toContain('"permissionDecision": "deny"');
+  });
+
+  it('NANOCLAW_GROUP_DIR unset → deny on gh pr create', () => {
+    writeFreshApproval();
+    const { stdout } = runHook(
+      { tool_name: 'Bash', tool_input: { command: 'gh pr create' } },
+      { home: TEST_HOME, extraEnv: { NANOCLAW_GROUP_DIR: '' } },
+    );
+    expect(stdout).toContain('"permissionDecision": "deny"');
+  });
 });
