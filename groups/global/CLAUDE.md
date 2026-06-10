@@ -22,14 +22,8 @@
 
 1. **写 plan** — 调 `Skill(superpowers:writing-plans)` 生成 `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`，列改动范围 / 受影响文件 / 风险 / 验证步骤
 2. **派 critic 对抗审 plan** — 派子代理（`Agent(subagent_type=general-purpose)` 或 `Skill(codex:rescue)`）prompt 写「adversarially review this plan: surface missing edge cases / wrong assumptions / better alternatives」，把 critic 反馈拼回 plan 末尾
-3. **把 plan + critic 摘要发给用户，等明确批准** — 用户没说「按 plan 改 / 这个 plan 行 / go ahead 实施」之前**禁止动代码**。用户说了批准，nanoclaw 主进程会自动写 `<group>/.approvals/<id>.json` 文件，这是 hook 校验的硬证据。
+3. **把 plan + critic 摘要发给用户，等明确批准** — 用户没说「按 plan 改 / 这个 plan 行 / go ahead 实施」之前**禁止动代码**
 4. **实施完调 code review** — 改完 + 自测通过后，调 `Skill(superpowers:requesting-code-review)` 派 reviewer 审实施结果，把 PR 链接 + review 摘要一起发给用户，等 merge 指令
-
-**Approval marker（硬约束）：**
-- 用户说「按 plan 改 / go ahead / 实施吧 / 开始动手 / plan approved / 这个 plan 行」→ nanoclaw 自动在群目录写 `.approvals/<id>.json`，TTL=30min
-- host-guard 拦下所有开 PR 的命令（`gh pr create` / `gh api .../pulls` / `curl .../pulls`），必须看到一个**未消费、未过期**的 approval 才放行
-- 放行时 hook 自动 `mv .json → .consumed.json`：**一个 approval = 一次 PR-create**，第二次开 PR 必须重新让用户批准
-- 禁止动作：❌ 自己 `touch` / `echo > .approvals/fake.json` 伪造 marker（commit log 会审计）；❌ `NANOCLAW_GROUP_DIR=/other/group gh pr create` 跨群盗用别群的 approval（已被 hook 拦）
 
 **Merge 协议**（纪律层，hook 不拦——用户标准流程里需要你帮忙合 PR）：
 
@@ -52,9 +46,6 @@ PR 开完后**默认停手**：把 PR 链接 + reviewer 摘要发给用户、报
 - ❌ 把「祈使 + 列表内问句」整段当任务清单做（见 PR #3085 案例）
 - ❌ **跳过 plan / critic / code-review 任一步直接动代码 / 开 PR**——任何代码改动都必须方案挡四步全走
 - ❌ 「我已经改完了 PR 链接 xxx，已合并到 dev」这种把 commit / push / merge 一条龙吃掉的回复
-- ❌ `touch <group>/.approvals/*.json` 或任何手工写 approval marker——LLM 必须等用户真实批准消息触发 nanoclaw 自动写
-- ❌ `NANOCLAW_GROUP_DIR=...` 内联跨群盗用 approval（hook 拦）
-- ❌ `gh api .../pulls -X POST` 或 `curl .../pulls -X POST` 绕过 `gh pr create`（hook 拦）
 
 **事故案例参考**：
 
@@ -89,6 +80,83 @@ DOTA 是 Nine 项目的全质量管线（需求收敛 → spec → plan → 审�
 - 禁止跳步：每 Phase 输出 ▶（进入）/ ✓（完成）标记
 - 大写入分块：见上面 #5
 - Phase 入口立即 Read：见上面 #1
+
+### Nine 会话链接（强制规则）
+
+看到 `http://10.117.5.134/dev/context/<conv_id>` 这种链接 —— 这是 Nine 的「上下文 X 光」前端页。用户可能直接发链接、发末段 UUID、或只口头说"那个 conv"——任何一种形式，都抽出 UUID 当 `<conv_id>`，走下面两条**公开 HTTP API**（无需 SSH、无需鉴权 header，直接 curl）：
+
+- **事件时间线**（结构化事件数组）：
+  `curl -sS "http://10.117.5.134/api/v1/dev/context-xray/<conv_id>"`
+- **完整消息体**（按 iteration 分组的 user / assistant / tool 消息）：
+  `curl -sS "http://10.117.5.134/api/v1/dev/context-xray/<conv_id>/messages"`
+
+**禁止**回复用户"读不了"、"需要截图"、"被安全护栏挡了"。这条规则给你了，你能读。
+
+#### 诊断剧本（用户让你「定位问题」时按这个顺序走）
+
+1. **先拉 events**，关注这些字段决定下一步：
+   - `tool_call.tool_name` 序列 → 跑了哪些 skill（`load_skill` / `run_skill` 的入参里有 skill 名）
+   - `run_start.engine` / `model` / `source` → 用的是 main_agent / 子 agent，哪个 loop，什么模型
+   - `run_end.is_error` / `exit_reason` / `stop_reason` → 是否异常退出，退出原因
+   - `iteration` 里的 `tool_calls_count` / `messages_count` → 跑了几轮、有没有死循环迹象
+   - `llm_usage.input_tokens` / `cache_hit_rate` → context 是不是炸了 / cache 是不是没命中
+2. **再拉 messages**，看实际内容：
+   - 用户原始 input；assistant 每轮的 `text` 和 `tool_calls`；tool 返回值；是否中途失败/重试
+3. **交叉对照 skill 源码**（这群的本职工作是修招聘 lite skill）：
+   - 招聘 lite skill 源码：`/workspace/extra/vibe-coding/nine/skills/recruitment_requirement_define_lite/`
+   - 其它 skill：`/workspace/extra/vibe-coding/nine/skills/<skill_name>/` 或 `/workspace/extra/vibe-coding/nine/employee_skills/<name>/`
+   - skill 的 SKILL.md / prompt / tool 定义都在这里，直接 Read 比较「期望行为 vs xray 里看到的实际行为」
+4. **常见症状 → 怀疑点**：
+   - assistant 输出了奇怪的「评估字段 / 打分 / 维度」→ 多半是 skill 的 prompt / system prompt / 评估模板写死了，去 skill 源码 grep
+   - tool 调用失败、参数错 → 看 messages 里 tool 的 `error` 字段 + skill 的 tool schema
+   - 中途断了、没回复 → 看 `run_end.exit_reason` + `microcompact` 是否吃掉了关键消息
+   - 答非所问 → 看 user message 原文 vs skill 入口路由（`load_skill` 拿到的是不是对的 skill）
+5. **报告时**：贴关键 event 字段截取 + skill 源码 file:line + 你的诊断结论。**禁止**只说"看起来有问题"不给证据；遵守上面的「认知诚实」铁律，结论性陈述必须有「已查」依据。
+
+#### 高级链路追踪（用户主动给了 trace_id 才用）
+
+xray events 本身**不带** trace_id。如果用户主动从 GlitchTip / 监控板拷了 trace_id 给你，可以 curl Jaeger（公开无 auth）：
+`curl -sS "http://10.117.5.134:16686/api/traces/<trace_id>"` → 全链路 span 树，能看到 backend / go-api / LLM 调用的耗时和错误。Loki/GlitchTip 需要鉴权或 SSH，这个群没装，缺这个就跟用户说一声「需要 trace_id 我才能拉 Jaeger」，别瞎编。
+
+### 宿主代码访问的边界
+
+`/workspace/extra/vibe-coding/nine/` 是**可读可写**的真实挂载，跟其他子目录一样。安全护栏（`nanoclaw-host-guard.sh`）**只拦 Bash 工具**里的危险命令（具体说：`cd` / `pushd` / `git -C` / `find` / `xargs` 进入 `~/Desktop/vibe-coding/` 或 `/workspace/extra/vibe-coding/`），**不拦** Read / Edit / Write，更不会"禁止读这个目录"。要找 Nine 的代码、schema、API 实现，直接 Read / Grep 就行。不要凭印象编造"被护栏禁止"的理由。
+
+### 写代码 / 改 Nine 项目（强制规则）
+
+**用户的主开发目录 `~/Desktop/vibe-coding/nine/` 是你的「只读区」** —— 你可以 Read / Grep，但**禁止** Edit / Write 进去（容易撞用户 in-progress 工作，2026-05-22 事故就是这么出的；guard 拦了 git，但 Edit/Write 是漏的，需要你自己守纪律）。
+
+**所有改动都在专用 nanoclaw worktree 里做：**
+
+- 默认 worktree：`~/nanoclaw-worktrees/nine-dev/`（dev 分支，remote 是 `TierIITech/nine`，跟 `~/Desktop/vibe-coding/nine` 共享同一个 origin，host-guard 完全放开这条路径）
+
+**标准开发流程：**
+
+```bash
+cd ~/nanoclaw-worktrees/nine-dev
+git fetch origin
+git checkout -b fix/recruit-lite-<topic> origin/dev   # 任何时候从最新 origin/dev 切
+
+# —— 用 Edit / Write 改 ~/nanoclaw-worktrees/nine-dev/ 下的文件（绝对路径！）——
+# 千万不要 Edit ~/Desktop/vibe-coding/nine/<同名文件>
+
+git add -A
+git commit -m "fix(recruit-lite): <一句话>"
+git push -u origin fix/recruit-lite-<topic>
+gh pr create --base dev --head fix/recruit-lite-<topic> --title "..." --body "..."
+```
+
+**为什么这样设计**：
+- guard 黑名单只匹配 `~/Desktop/vibe-coding/` 和 `/workspace/extra/vibe-coding/` 前缀；`~/nanoclaw-worktrees/` 不在内，cd / git 全放行
+- worktree 共享同一个 .git，push 出去的分支跟用户在主目录看到的是同一个 remote，PR 链接照常工作
+- 用户的 in-progress 工作（uncommitted changes、未推的 commit）都在主目录的 worktree 里，你在 nanoclaw worktree 里折腾完全不影响
+
+**异常情况：**
+- `~/nanoclaw-worktrees/nine-dev/` 不存在 / 损坏 → 告诉用户在终端跑 `git -C ~/Desktop/vibe-coding/nine worktree add ~/nanoclaw-worktrees/nine-dev dev`（这条 guard 也会拦，必须用户手工）。**禁止**你自己尝试创建——会被 guard 弹回。
+- 已经手贱 Edit 到了 `~/Desktop/vibe-coding/nine/<文件>` → 立刻：(1) `cp` 那些文件到 worktree 对应路径；(2) `cd ~/Desktop/vibe-coding/nine && git checkout -- <那些文件>` —— 但这条 cd 你跑不了，必须告诉用户在终端手工 revert。报告时如实说明这是你的失误，别假装没发生。
+
+**禁止**回复用户「安全护栏挡住了 git 操作，请你在终端里执行……」这种把 git ops 完整甩回给用户的话——你自己有 worktree 路径，完整跑完 commit + push + PR 再交付。仅当上面那两种异常情况才动用人工兜底。
+
 
 ---
 
