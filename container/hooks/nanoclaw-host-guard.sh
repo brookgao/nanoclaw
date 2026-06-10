@@ -95,4 +95,92 @@ for re in "${FORBIDDEN_REGEXES[@]}"; do
   fi
 done
 
+# ===== Action-mode bans (independent of working directory) =====
+# These intercept dangerous OPERATIONS even from legitimate worktrees.
+# Background: 2026-06-09 PRD-review-dev incident — Andy ran `git push origin
+# dev` from a clean worktree, bypassing PR workflow. Path-based FORBIDDEN_REGEXES
+# above didn't catch it (worktree path was legit). These regexes patch that.
+#
+# Design notes (synced with src/nanoclaw-host-guard.test.ts):
+#   - Command-position anchor `(^|[[:space:]&;|])\bgit\b` — git must start
+#     a command (line start, after ; & |, or after whitespace following one).
+#     This prevents `echo "git push origin dev"` from being denied as a
+#     false-positive on string literals (reviewer I2).
+#   - `\bgit\b[^|;&]*\bpush\b` (not git[[:space:]]+push) so `git -c cfg push`
+#     and `git --no-pager push` are caught (plan critic C3).
+#   - No \$ end-anchor on branch name; trailing flags (e.g. dev --force) must
+#     still match (plan critic C1).
+#   - `+` is allowed as ref prefix to catch force-update refspec
+#     `git push origin +dev` (review C2).
+#   - grep -qiE (case-insensitive) catches `DEV`/`Main` aliases (review I1).
+#   - [^|;&] blocks crossing command separators within one line. grep is
+#     line-oriented, so multi-line input is matched per line.
+#   - KNOWN GAP: variable expansion `BRANCH=dev; git push origin $BRANCH` is
+#     not parsed; only the literal string is matched (review I3).
+
+ANCHOR='(^|[;&|])[[:space:]]*'
+
+# A) Push to protected branches (dev/main/master) — must go through PR
+ACTION_BANS_PROTECTED_BRANCH=(
+  # bare branch or +force-update prefix: origin dev / origin +dev / origin "dev"
+  "${ANCHOR}\bgit\b[^|;&]*\bpush\b[^|;&]*([[:space:]]|\+)['\"]?(dev|main|master)['\"]?([[:space:]]|\$)"
+  # any src:dst with protected dst: HEAD:dev, local:dev, :dev (delete), +local:dev
+  "${ANCHOR}\bgit\b[^|;&]*\bpush\b[^|;&]*:(dev|main|master)([[:space:]]|\$|['\"])"
+  # refs/heads/(dev|main|master) — also covers +refs/heads/dev
+  "${ANCHOR}\bgit\b[^|;&]*\bpush\b[^|;&]*refs/heads/(dev|main|master)([[:space:]]|\$|['\"])"
+  # --mirror / --all push every local ref (including dev/main) to remote
+  "${ANCHOR}\bgit\b[^|;&]*\bpush\b[^|;&]*--(mirror|all)\b"
+)
+
+for re in "${ACTION_BANS_PROTECTED_BRANCH[@]}"; do
+  if printf '%s' "$CMD" | grep -qiE "$re"; then
+    deny "❌ Nanoclaw 安全护栏：禁止直推保护分支 (dev/main/master)。
+必须走标准 PR 流程：
+  git push origin <feature-branch>
+  gh pr create --base dev --head <feature-branch> ...
+  # 等用户说「合了 / merge」+ echo PR 号确认 → gh pr merge
+
+停下来报告用户，等明确授权后才能尝试别的路径。
+
+命中命令:
+  $CMD"
+  fi
+done
+
+# B) Force push — destructive on ANY branch (could overwrite peer work)
+ACTION_BANS_FORCE_PUSH=(
+  # --force / --force-with-lease / --force-with-lease=<ref> (\b at e|- or e|=)
+  "${ANCHOR}\bgit\b[^|;&]*\bpush\b[^|;&]*--force\b"
+  # bundled short flags containing -f: -f / -fu / -uf
+  "${ANCHOR}\bgit\b[^|;&]*\bpush\b[^|;&]*[[:space:]]-[a-zA-Z]*f[a-zA-Z]*([[:space:]]|\$)"
+)
+
+for re in "${ACTION_BANS_FORCE_PUSH[@]}"; do
+  if printf '%s' "$CMD" | grep -qiE "$re"; then
+    deny "❌ Nanoclaw 安全护栏：禁止强制推 (--force / -f / --force-with-lease)。
+强制推会覆盖远程别人的工作。
+停下来报告用户，等明确授权；禁止自行绕路。
+
+命中命令:
+  $CMD"
+  fi
+done
+
+# C) Bypassing commit hooks or GPG signing
+ACTION_BANS_BYPASS_VERIFY=(
+  "${ANCHOR}\bgit\b[^|;&]*\b(commit|push)\b[^|;&]*--no-verify\b"
+  "${ANCHOR}\bgit\b[^|;&]*\b(commit|push)\b[^|;&]*--no-gpg-sign\b"
+)
+
+for re in "${ACTION_BANS_BYPASS_VERIFY[@]}"; do
+  if printf '%s' "$CMD" | grep -qiE "$re"; then
+    deny "❌ Nanoclaw 安全护栏：禁止跳过 commit hook / GPG 签名 (--no-verify / --no-gpg-sign)。
+团队 hook / 签名是 CI 前置门。
+停下来报告用户，等明确授权；禁止自行绕路。
+
+命中命令:
+  $CMD"
+  fi
+done
+
 exit 0
