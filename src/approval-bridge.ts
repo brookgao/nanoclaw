@@ -25,15 +25,18 @@ const APPROVALS_SUBDIR = '.approvals';
 const TTL_MS = 30 * 60 * 1000; // 30 min — fresh window for PR-create
 const GC_AFTER_MS = 60 * 60 * 1000; // delete files 1h past TTL
 
-// Anchored on `^` so the keyword must START the message. Avoids matching
-// "我之前说过按 plan 改了" type retrospective references.
+// Anchored on `^` so the keyword must START the message. Negative-lookahead
+// `(?!完)` prevents retrospective matches like "按 plan 改完了" / "实施完了"
+// (reviewer I4) — `完` is the strong retrospective marker. Single `了` is
+// allowed (it's a valid imperative-with-particle form: "开始动手了").
+const NO_DONE = '(?!完)';
 const PLAN_APPROVAL_PATTERNS: RegExp[] = [
-  /^按\s?plan\s?(改|实施|做|来)/i,
-  /^这个?\s?plan\s?(行|可以|ok)/i,
-  /^plan\s?(approved?|批准|通过)/i,
+  new RegExp(`^按\\s?plan\\s?(改|实施|做|来)${NO_DONE}`, 'i'),
+  new RegExp(`^这个?\\s?plan\\s?(行|可以|ok)`, 'i'),
+  new RegExp(`^plan\\s?(approved?|批准|通过)`, 'i'),
   /^go\s?ahead\b/i,
-  /^实施吧/,
-  /^开始(写|做|实施|动手)/,
+  new RegExp(`^实施吧${NO_DONE}`),
+  new RegExp(`^开始(写|做|实施|动手)${NO_DONE}`),
 ];
 
 export interface ApprovalCheckResult {

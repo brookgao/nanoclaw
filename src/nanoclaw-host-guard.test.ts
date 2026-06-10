@@ -255,7 +255,7 @@ describe('nanoclaw-host-guard hook — action bans: push to protected branch', (
     'touch master.md',
     // command-position anchor: git inside string literal must NOT trigger (review I2)
     'echo "see: git push origin dev"',
-    'echo \'usage: git push origin main\'',
+    "echo 'usage: git push origin main'",
     'cat README.md # mentions git push origin dev',
   ];
   for (const cmd of allowCases) {
@@ -389,6 +389,19 @@ describe('nanoclaw-host-guard hook — D-class: gh pr create approval gate', () 
     'gh api repos/foo/bar/pulls --method POST -f title=x',
     'gh api /repos/foo/bar/pulls -f title=x',
     'curl -X POST -H "Authorization: token T" https://api.github.com/repos/foo/bar/pulls',
+    // Reviewer C2: -X POST BEFORE URL
+    'gh api -X POST /repos/x/y/pulls -f title=x',
+    'gh api -X POST /repos/x/y/pulls --input payload.json',
+    // Reviewer C2: --method POST before URL
+    'gh api --method POST repos/x/y/pulls',
+    // Reviewer I1: graphql mutation
+    "gh api graphql -f query='mutation{createPullRequest(input:{title:\"x\"}){pullRequest{number}}}'",
+    // Reviewer recommended #5: curl --data
+    'curl --data @body.json https://api.github.com/repos/x/y/pulls',
+    // Reviewer recommended #6: curl URL before -X
+    'curl https://api.github.com/repos/x/y/pulls -X POST -d \'{"title":"x"}\'',
+    // gh api GET /pulls also gated (conservative — user should use `gh pr list`)
+    'gh api repos/x/y/pulls',
   ];
 
   for (const cmd of PR_CREATE_CMDS) {

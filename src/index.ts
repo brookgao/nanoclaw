@@ -52,10 +52,7 @@ import { getLatestUserSenderForChat } from './db.js';
 import { FeishuChannel } from './channels/feishu.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { checkDotaDecision } from './dota-bridge.js';
-import {
-  checkApprovalKeywords,
-  writeApproval,
-} from './approval-bridge.js';
+import { checkApprovalKeywords, writeApproval } from './approval-bridge.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -778,14 +775,17 @@ async function main(): Promise<void> {
         }
       }
 
-      // Sender allowlist drop mode: discard messages from denied senders before storing
+      // Sender allowlist drop mode + approval keyword detection share one
+      // loadSenderAllowlist() call to avoid double YAML parse per message
+      // (reviewer I5).
+      let allowlistCfg: ReturnType<typeof loadSenderAllowlist> | null = null;
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
-        const cfg = loadSenderAllowlist();
+        allowlistCfg = loadSenderAllowlist();
         if (
-          shouldDropMessage(chatJid, cfg) &&
-          !isSenderAllowed(chatJid, msg.sender, cfg)
+          shouldDropMessage(chatJid, allowlistCfg) &&
+          !isSenderAllowed(chatJid, msg.sender, allowlistCfg)
         ) {
-          if (cfg.logDenied) {
+          if (allowlistCfg.logDenied) {
             logger.debug(
               { chatJid, sender: msg.sender },
               'sender-allowlist: dropping message (drop mode)',
@@ -794,6 +794,11 @@ async function main(): Promise<void> {
           return;
         }
       }
+
+      // Store the message FIRST so the matched_message_id in the approval
+      // marker references a real DB row (reviewer I2: previously approval
+      // could persist with a dangling message_id if storeMessage later threw).
+      storeMessage(msg);
 
       // Approval keyword detection — writes <group>/.approvals/<id>.json
       // so host-guard can validate `gh pr create` / `gh api .../pulls` /
@@ -807,7 +812,7 @@ async function main(): Promise<void> {
         !msg.is_bot_message &&
         registeredGroups[chatJid]
       ) {
-        const cfg = loadSenderAllowlist();
+        const cfg = allowlistCfg ?? loadSenderAllowlist();
         const senderIsTrusted = isSenderAllowed(chatJid, msg.sender, cfg);
         if (senderIsTrusted) {
           const result = checkApprovalKeywords(
@@ -843,8 +848,6 @@ async function main(): Promise<void> {
           }
         }
       }
-
-      storeMessage(msg);
     },
     onChatMetadata: (
       chatJid: string,

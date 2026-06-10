@@ -58,6 +58,11 @@ describe('checkApprovalKeywords', () => {
     ['不批准', false],
     ['我之前说过按 plan 改了', false], // 非开头不算
     ['你帮我改', false],
+    // 反向 retrospective (reviewer I4) — `完` 是 retrospective 强标志
+    ['按 plan 改完了', false],
+    ['按 plan 实施完了', false],
+    ['开始写完了', false],
+    ['实施吧完成了', false], // 不太合语法但作为 safety
   ])('rejects: %s → %s', (text, expected) => {
     expect(checkApprovalKeywords(text).matched).toBe(expected);
   });
@@ -79,10 +84,7 @@ describe('writeApproval', () => {
       matchedSender: 'ou_a',
     });
     const data = JSON.parse(
-      fs.readFileSync(
-        path.join(tmpDir, '.approvals', filename),
-        'utf-8',
-      ),
+      fs.readFileSync(path.join(tmpDir, '.approvals', filename), 'utf-8'),
     );
     expect(data.kind).toBe('plan');
     expect(data.matched_text).toBe('按 plan 改');

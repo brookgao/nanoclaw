@@ -208,14 +208,25 @@ approval 给本群 PR 开门。任何 PR 必须用本群的合法 approval。
   $CMD"
 fi
 
-# Detect PR-creating commands
-PR_CREATE_RE="${ANCHOR}(\bgh\b[^|;&]*\bpr\b[^|;&]*\bcreate\b)"
-GH_API_PULLS_RE="${ANCHOR}\bgh\b[^|;&]*\bapi\b[^|;&]*/pulls\b[^|;&]*(-X[[:space:]]*POST|--method[[:space:]]*POST)"
-GH_API_PULLS_DEFAULT_RE="${ANCHOR}\bgh\b[^|;&]*\bapi\b[^|;&]*/pulls\b[^|;&]*(-f[[:space:]]|--field[[:space:]]|--raw-field[[:space:]])"
+# Detect PR-creating commands.
+#
+# Strategy: catch every path that opens a PR, regardless of flag ORDER.
+# Reviewer C2 fix: previously `-X POST` had to appear AFTER `/pulls`; we
+# now use position-independent detection. Any `gh api .../pulls` command
+# is treated as PR-touching — GET against /pulls is rare (use `gh pr list`),
+# so the conservative gate is acceptable.
+PR_CREATE_RE="${ANCHOR}\bgh\b[^|;&]*\bpr\b[^|;&]*\bcreate\b"
+# gh api against the /pulls REST endpoint (any HTTP method).
+GH_API_PULLS_RE="${ANCHOR}\bgh\b[^|;&]*\bapi\b[^|;&]*/pulls\b"
+# Reviewer I1: gh api graphql mutation createPullRequest is a separate path.
+GH_API_GRAPHQL_PR_RE="${ANCHOR}\bgh\b[^|;&]*\bapi\b[^|;&]*\bgraphql\b[^|;&]*createPullRequest"
+# Raw curl against github.com /pulls REST.
 CURL_API_PULLS_RE="${ANCHOR}\bcurl\b[^|;&]*api\.github\.com[^|;&]*/pulls\b"
+# Curl against graphql endpoint with createPullRequest mutation.
+CURL_GRAPHQL_PR_RE="${ANCHOR}\bcurl\b[^|;&]*api\.github\.com/graphql\b[^|;&]*createPullRequest"
 
 is_pr_create="no"
-for re in "$PR_CREATE_RE" "$GH_API_PULLS_RE" "$GH_API_PULLS_DEFAULT_RE" "$CURL_API_PULLS_RE"; do
+for re in "$PR_CREATE_RE" "$GH_API_PULLS_RE" "$GH_API_GRAPHQL_PR_RE" "$CURL_API_PULLS_RE" "$CURL_GRAPHQL_PR_RE"; do
   if printf '%s' "$CMD" | grep -qiE "$re"; then
     is_pr_create="yes"
     break
@@ -277,9 +288,18 @@ approval marker 由 nanoclaw 主进程在收到用户批准消息时自动写入
   $CMD"
   fi
 
-  # Consume the marker — atomic rename, one approval = one PR-create call
-  # (critic C3). If user wants another PR, they must approve again.
-  mv "$fresh_file" "${fresh_file%.json}.consumed.json" 2>/dev/null || true
+  # Consume the marker — atomic rename, one approval = one PR-create call.
+  # Reviewer C1 fix: rename FAILURE (race with another concurrent PR-create
+  # also consuming this marker) must result in deny, not allow. Previously
+  # `|| true` swallowed the race → both PRs went through with one approval.
+  if ! mv "$fresh_file" "${fresh_file%.json}.consumed.json" 2>/dev/null; then
+    deny "❌ Nanoclaw 安全护栏：approval marker 消费失败（并发 PR-create 抢占）。
+另一个并发的 gh pr create 已经消费了同一个 approval。
+让用户重新批准后再开 PR。
+
+命中命令:
+  $CMD"
+  fi
 fi
 
 exit 0
