@@ -95,4 +95,82 @@ for re in "${FORBIDDEN_REGEXES[@]}"; do
   fi
 done
 
+# ===== Action-mode bans (independent of working directory) =====
+# These intercept dangerous OPERATIONS even from legitimate worktrees.
+# Background: 2026-06-09 PRD-review-dev incident — Andy ran `git push origin
+# dev` from a clean worktree, bypassing PR workflow. Path-based FORBIDDEN_REGEXES
+# above didn't catch it (worktree path was legit). These regexes patch that.
+#
+# Design notes (synced with src/nanoclaw-host-guard.test.ts):
+#   - \bgit\b[^|;&]*\bpush\b (not git[[:space:]]+push) so `git -c cfg push`
+#     and `git --no-pager push` are caught (critic C3).
+#   - No \$ end-anchor; trailing flags (e.g. dev --force) must still match
+#     (critic C1).
+#   - [^|;&] blocks crossing command separators within one line. grep -qE
+#     processes line-by-line, so multi-line input is matched per line.
+
+# A) Push to protected branches (dev/main/master) — must go through PR
+ACTION_BANS_PROTECTED_BRANCH=(
+  # bare branch as ref token: `... origin dev`, `... origin dev --force`,
+  # `... origin "dev"`, `... origin 'main'`
+  "\bgit\b[^|;&]*\bpush\b[^|;&]*[[:space:]]['\"]?(dev|main|master)['\"]?([[:space:]]|\$)"
+  # any src:dst form with protected dst: HEAD:dev, local-dev:dev, :dev (delete)
+  "\bgit\b[^|;&]*\bpush\b[^|;&]*:(dev|main|master)([[:space:]]|\$|['\"])"
+  # refs/heads/(dev|main|master)
+  "\bgit\b[^|;&]*\bpush\b[^|;&]*refs/heads/(dev|main|master)([[:space:]]|\$|['\"])"
+)
+
+for re in "${ACTION_BANS_PROTECTED_BRANCH[@]}"; do
+  if printf '%s' "$CMD" | grep -qE "$re"; then
+    deny "❌ Nanoclaw 安全护栏：禁止直推保护分支 (dev/main/master)。
+必须走标准 PR 流程：
+  git push origin <feature-branch>
+  gh pr create --base dev --head <feature-branch> ...
+  # 等用户说「合了 / merge」+ echo PR 号确认 → gh pr merge
+
+停下来报告用户，等明确授权后才能尝试别的路径。
+
+命中命令:
+  $CMD"
+  fi
+done
+
+# B) Force push — destructive on ANY branch (could overwrite peer work)
+ACTION_BANS_FORCE_PUSH=(
+  # --force / --force-with-lease (both match this; \b at e|-)
+  "\bgit\b[^|;&]*\bpush\b[^|;&]*--force\b"
+  # bundled short flags containing -f: -f / -fu / -uf / etc.
+  # Requires the flag cluster to be a standalone token (preceded by space,
+  # followed by space or EOL) and to contain 'f' among the flag chars.
+  "\bgit\b[^|;&]*\bpush\b[^|;&]*[[:space:]]-[a-zA-Z]*f[a-zA-Z]*([[:space:]]|\$)"
+)
+
+for re in "${ACTION_BANS_FORCE_PUSH[@]}"; do
+  if printf '%s' "$CMD" | grep -qE "$re"; then
+    deny "❌ Nanoclaw 安全护栏：禁止强制推 (--force / -f / --force-with-lease)。
+强制推会覆盖远程别人的工作。
+停下来报告用户，等明确授权；禁止自行绕路。
+
+命中命令:
+  $CMD"
+  fi
+done
+
+# C) Bypassing commit hooks or GPG signing
+ACTION_BANS_BYPASS_VERIFY=(
+  "\bgit\b[^|;&]*\b(commit|push)\b[^|;&]*--no-verify\b"
+  "\bgit\b[^|;&]*\b(commit|push)\b[^|;&]*--no-gpg-sign\b"
+)
+
+for re in "${ACTION_BANS_BYPASS_VERIFY[@]}"; do
+  if printf '%s' "$CMD" | grep -qE "$re"; then
+    deny "❌ Nanoclaw 安全护栏：禁止跳过 commit hook / GPG 签名 (--no-verify / --no-gpg-sign)。
+团队 hook / 签名是 CI 前置门。
+停下来报告用户，等明确授权；禁止自行绕路。
+
+命中命令:
+  $CMD"
+  fi
+done
+
 exit 0
