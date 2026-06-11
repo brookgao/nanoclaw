@@ -1,5 +1,6 @@
 import * as lark from '@larksuiteoapi/node-sdk';
-import { extname } from 'path';
+import fs from 'fs';
+import { basename, extname } from 'path';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { AgentEvent, Channel, NewMessage } from '../types.js';
 import { logger } from '../logger.js';
@@ -1304,6 +1305,67 @@ export class FeishuChannel implements Channel {
 
   ownsJid(jid: string): boolean {
     return jid.startsWith(JID_PREFIX);
+  }
+
+  /**
+   * Send a file attachment to a Feishu chat. Uses Lark's first-party
+   * im.file.create for multipart upload (`client.request` with form-data is
+   * mangled by the SDK's Object.assign payload merge — see critic B2).
+   * Throws on Lark API failure; caller (ipc.ts) catches.
+   */
+  async sendFile(
+    jid: string,
+    filePath: string,
+    filename?: string,
+  ): Promise<void> {
+    if (!jid.startsWith(JID_PREFIX)) {
+      throw new Error(`Not a Feishu JID: ${jid}`);
+    }
+    const chatId = jid.slice(JID_PREFIX.length);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File does not exist: ${filePath}`);
+    }
+    const displayName = filename ?? basename(filePath);
+
+    // Async read avoids event-loop blocking for larger files (review I2;
+    // critical because feishu WS watchdog kills after 10min silence).
+    const fileBuffer = await fs.promises.readFile(filePath);
+    const uploadRes: any = await this.client.im.file.create({
+      data: {
+        file_type: 'stream',
+        file_name: displayName,
+        file: fileBuffer as any,
+      },
+    });
+    const fileKey: string | undefined =
+      uploadRes?.file_key ?? uploadRes?.data?.file_key;
+    if (!fileKey) {
+      logger.error(
+        { jid, filePath, uploadRes },
+        '[feishu] file upload returned no file_key',
+      );
+      throw new Error('Feishu file upload returned no file_key');
+    }
+
+    await this.client.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: {
+        receive_id: chatId,
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: fileKey }),
+      },
+    });
+
+    // Truncate fileKey in log to avoid leaking download token (review M2).
+    logger.info(
+      {
+        jid,
+        filePath,
+        displayName,
+        fileKey: fileKey.slice(0, 8) + '...',
+      },
+      '[feishu] file sent',
+    );
   }
 
   async cleanupStaleCards(): Promise<void> {
