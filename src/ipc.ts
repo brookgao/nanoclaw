@@ -18,6 +18,11 @@ import {
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendFile?: (
+    jid: string,
+    filePath: string,
+    filename?: string,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -88,7 +93,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // targetSelf: resolve chatJid from sourceGroup's registered JID
-              if (data.type === 'message' && data.targetSelf && !data.chatJid) {
+              // (covers both `message` and `file` types — critic B3)
+              if (
+                (data.type === 'message' || data.type === 'file') &&
+                data.targetSelf &&
+                !data.chatJid
+              ) {
                 const groups = deps.registeredGroups();
                 const jid = Object.keys(groups).find(
                   (k) => groups[k].folder === sourceGroup,
@@ -122,6 +132,51 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              }
+              if (data.type === 'file' && data.chatJid && data.path) {
+                // Authorization: same as message — group can send to its own
+                // jid; main can send anywhere.
+                //
+                // KNOWN LIMITATION (path sandbox / I1): data.path is passed
+                // unverified to deps.sendFile, which fs reads it. A
+                // compromised/jailbroken Andy could pass /Users/admin/.ssh/...
+                // and exfiltrate. Trust boundary is currently at agent prompt
+                // level. Hardening (path.resolve containment within
+                // group's NANOCLAW_GROUP_DIR) is tracked as follow-up.
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  if (!deps.sendFile) {
+                    // Throw so outer catch moves IPC file to errors/ — gives
+                    // the user a paper trail instead of silent drop (review
+                    // C2).
+                    throw new Error(
+                      `IPC file: channel has no sendFile implementation (chatJid=${data.chatJid})`,
+                    );
+                  }
+                  // Let sendFile throw → outer catch moves IPC file to
+                  // errors/ uniformly with message branch.
+                  await deps.sendFile(
+                    data.chatJid,
+                    data.path,
+                    data.filename,
+                  );
+                  logger.info(
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      path: data.path,
+                    },
+                    'IPC file sent',
+                  );
+                } else {
+                  // Throw so outer catch moves IPC file to errors/ (review C2).
+                  throw new Error(
+                    `Unauthorized IPC file attempt: sourceGroup=${sourceGroup} → chatJid=${data.chatJid}`,
                   );
                 }
               }

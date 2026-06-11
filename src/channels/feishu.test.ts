@@ -1695,3 +1695,116 @@ describe('FeishuChannel zombie cleanup', () => {
     setIntervalSpy.mockRestore();
   });
 });
+
+describe('FeishuChannel.sendFile', () => {
+  let tmpFile: string;
+  let fs: typeof import('fs');
+
+  beforeEach(async () => {
+    process.env.FEISHU_APP_ID = 'test-id';
+    process.env.FEISHU_APP_SECRET = 'test-secret';
+    fs = await import('fs');
+    tmpFile = '/tmp/nanoclaw-sendfile-test.md';
+    fs.writeFileSync(tmpFile, '# Test\n\nHello.\n');
+  });
+  afterEach(() => {
+    if (tmpFile && fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+    restoreEnv(origEnv);
+  });
+
+  function makeChannel() {
+    const factory = getChannelFactory('feishu')!;
+    const ch = factory(makeOpts())! as any;
+    return ch;
+  }
+
+  it('uploads file then sends msg_type=file with returned file_key (top-level shape)', async () => {
+    const ch = makeChannel();
+    const fileCreate = vi.fn().mockResolvedValue({ file_key: 'fk-xyz' });
+    const messageCreate = vi.fn().mockResolvedValue({});
+    ch.client = {
+      im: {
+        file: { create: fileCreate },
+        message: { create: messageCreate },
+      },
+    };
+
+    await ch.sendFile('feishu:oc_abc', tmpFile);
+
+    expect(fileCreate).toHaveBeenCalledTimes(1);
+    const uploadArgs = fileCreate.mock.calls[0][0];
+    expect(uploadArgs.data.file_type).toBe('stream');
+    expect(uploadArgs.data.file_name).toBe('nanoclaw-sendfile-test.md');
+    expect(Buffer.isBuffer(uploadArgs.data.file)).toBe(true);
+
+    expect(messageCreate).toHaveBeenCalledTimes(1);
+    const msgArgs = messageCreate.mock.calls[0][0];
+    expect(msgArgs.params.receive_id_type).toBe('chat_id');
+    expect(msgArgs.data.receive_id).toBe('oc_abc');
+    expect(msgArgs.data.msg_type).toBe('file');
+    const content = JSON.parse(msgArgs.data.content);
+    expect(content.file_key).toBe('fk-xyz');
+  });
+
+  it('handles wrapped shape {data: {file_key}}', async () => {
+    const ch = makeChannel();
+    ch.client = {
+      im: {
+        file: {
+          create: vi.fn().mockResolvedValue({ data: { file_key: 'fk-2' } }),
+        },
+        message: { create: vi.fn().mockResolvedValue({}) },
+      },
+    };
+
+    await ch.sendFile('feishu:oc_abc', tmpFile);
+
+    const msgArgs = ch.client.im.message.create.mock.calls[0][0];
+    expect(JSON.parse(msgArgs.data.content).file_key).toBe('fk-2');
+  });
+
+  it('throws when upload returns no file_key (both branches null)', async () => {
+    const ch = makeChannel();
+    ch.client = {
+      im: {
+        file: { create: vi.fn().mockResolvedValue({ code: 0 }) },
+        message: { create: vi.fn() },
+      },
+    };
+
+    await expect(ch.sendFile('feishu:oc_abc', tmpFile)).rejects.toThrow(
+      /no file_key/,
+    );
+    expect(ch.client.im.message.create).not.toHaveBeenCalled();
+  });
+
+  it('uses explicit filename when provided', async () => {
+    const ch = makeChannel();
+    ch.client = {
+      im: {
+        file: { create: vi.fn().mockResolvedValue({ file_key: 'fk' }) },
+        message: { create: vi.fn().mockResolvedValue({}) },
+      },
+    };
+
+    await ch.sendFile('feishu:oc_abc', tmpFile, '简历-2026.md');
+
+    expect(ch.client.im.file.create.mock.calls[0][0].data.file_name).toBe(
+      '简历-2026.md',
+    );
+  });
+
+  it('rejects non-Feishu jid', async () => {
+    const ch = makeChannel();
+    await expect(ch.sendFile('telegram:123', tmpFile)).rejects.toThrow(
+      /Not a Feishu JID/,
+    );
+  });
+
+  it('rejects missing file', async () => {
+    const ch = makeChannel();
+    await expect(
+      ch.sendFile('feishu:oc_abc', '/tmp/does-not-exist.md'),
+    ).rejects.toThrow(/does not exist/);
+  });
+});

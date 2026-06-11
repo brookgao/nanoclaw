@@ -149,6 +149,13 @@ export interface Channel {
   // per-jid session state (e.g. Feishu cards) use this to force-cleanup when
   // the SDK didn't get a chance to emit a `final` event.
   onSessionEnded?(jid: string): Promise<void>;
+  // Optional: send a file attachment. Channels without file upload support
+  // (or those not yet implemented) omit this; the IPC watcher will warn.
+  sendFile?(
+    jid: string,
+    filePath: string,
+    filename?: string,
+  ): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

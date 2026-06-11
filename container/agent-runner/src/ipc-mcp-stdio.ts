@@ -78,6 +78,45 @@ server.tool(
 );
 
 server.tool(
+  'send_file',
+  "Send a file attachment to the user or group as a real file message. Use this when the user asks for a file they can download (e.g. an .md, .pdf, .doc, exported report). Pass an absolute path to a file that already exists in your workspace. Supported on Feishu; other channels may not support file attachments yet.",
+  {
+    path: z
+      .string()
+      .describe(
+        'Absolute path to the file on disk. The file must already exist when you call this tool.',
+      ),
+    filename: z
+      .string()
+      .optional()
+      .describe(
+        'Optional display name to show in chat. Defaults to the basename of `path`. Use this to rename a temp file to something meaningful.',
+      ),
+  },
+  async (args) => {
+    const data: Record<string, string | undefined> = {
+      type: 'file',
+      chatJid,
+      path: args.path,
+      filename: args.filename,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `File queued for delivery: ${args.path}`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 
