@@ -14,16 +14,18 @@
 
 | 用户说什么 | 你走什么 |
 |---|---|
-| 「改吧」/「动手」/「你来做」/「就这么改」/「你帮我改」/ 其他代码改动祈使 | **方案挡**：见下方「方案挡四步」 |
+| 「改吧」/「动手」/「你来做」/「就这么改」/「你帮我改」/ 其他代码改动祈使 | **方案挡**：见下方「方案挡六步」 |
 | `/dota <需求>` / 「走 DOTA」/「DOTA 一下」/「上 superpowers」 | **DOTA 全管线**：Phase 1-8 默认手动挡（spec → plan → critic → TDD → 实现 → code review → PR → merge），每 Phase 等用户确认 |
 | 用户没明确说就只是聊 / 答疑 / 反问 | **讨论挡**：只回答，不碰代码。**禁止**用「我已经改完了」结尾。 |
 
-**方案挡四步（缺一不可，每步等用户）：**
+**方案挡六步（缺一不可，每步独立检查点）：**
 
-1. **写 plan** — 调 `Skill(superpowers:writing-plans)` 生成 `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`，列改动范围 / 受影响文件 / 风险 / 验证步骤
-2. **派 critic 对抗审 plan** — 派子代理（`Agent(subagent_type=general-purpose)` 或 `Skill(codex:rescue)`）prompt 写「adversarially review this plan: surface missing edge cases / wrong assumptions / better alternatives」，把 critic 反馈拼回 plan 末尾
-3. **把 plan + critic 摘要发给用户，等明确批准** — 用户没说「按 plan 改 / 这个 plan 行 / go ahead 实施」之前**禁止动代码**
-4. **实施完调 code review** — 改完 + 自测通过后，调 `Skill(superpowers:requesting-code-review)` 派 reviewer 审实施结果，把 PR 链接 + review 摘要一起发给用户，等 merge 指令
+1. **写 plan** — 调 `Skill(superpowers:writing-plans)` 生成 `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`
+2. **派 critic 对抗审 plan** — 派子代理（`Agent(subagent_type=general-purpose)` 或 `Skill(codex:rescue)`），prompt 含「adversarially review this plan」，反馈拼回 plan 末尾
+3. **把 plan + critic 摘要发给用户，等明确批准** — 用户没说「按 plan 改 / 这个 plan 行 / go ahead」前**禁止动代码**
+4. **实施改动** — worktree 改 + commit + push 到 feature 分支。**此处禁止 `gh pr create`**——下一步必须先做
+5. **派 reviewer subagent**（step 5，历史最高发漏洞）—— **必须出现 `Task(subagent_type=code-reviewer)` 工具调用**（或等价的 `Skill(superpowers:requesting-code-review)` —— 它的实现就是派 code-reviewer subagent）。**自己读代码点头不算**。reviewer 输出**必须**含 `file:line` 级反馈（"OK"/"no issues"/"LGTM" 单字回应 = 摆拍 = 视同没跑）；若 reviewer 真的"no issues"也要**附 Task call id / 输出原文**给用户验证。**按 reviewer 原文 severity 字段判定**（不准自己重分类）：`Critical` / `Important` → 修完重审；只剩 `Minor` → 进下一步
+6. **开 PR + 等 merge** — `gh pr create --base dev`，把 PR 链接 + reviewer 摘要（**含具体 file:line 反馈**）一起发给用户，等 merge 指令
 
 **Merge 协议**（纪律层，hook 不拦——用户标准流程里需要你帮忙合 PR）：
 
@@ -44,7 +46,9 @@ PR 开完后**默认停手**：把 PR 链接 + reviewer 摘要发给用户、报
 - ❌ `git push --force` / `-f`——强制推任何分支
 - ❌ 把「确认型问题」当 go-ahead
 - ❌ 把「祈使 + 列表内问句」整段当任务清单做（见 PR #3085 案例）
-- ❌ **跳过 plan / critic / code-review 任一步直接动代码 / 开 PR**——任何代码改动都必须方案挡四步全走
+- ❌ **跳过六步任一步直接动代码 / 开 PR**——六步同等强制；step 5（派 reviewer subagent）历史高发漏洞
+- ❌ **reviewer subagent 输出只是"OK"/"LGTM"/"no issues"就当 review 通过**——这是摆拍，必须含 file:line 级反馈才算
+- ❌ **自己重分类 reviewer 的 severity**——必须按 reviewer 原文标签判定（`Critical` / `Important` / `Minor`），不准把 Important 私自降级为 Minor 跳过
 - ❌ 「我已经改完了 PR 链接 xxx，已合并到 dev」这种把 commit / push / merge 一条龙吃掉的回复
 
 **事故案例参考**：
