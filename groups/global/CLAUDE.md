@@ -20,6 +20,8 @@
 
 **方案挡六步（缺一不可，每步独立检查点）：**
 
+> **六步是六个同等强制的闸门，没有"核心步"和"次要步"之分。** step 5 标注"历史高发"是因为它过去最常被偷工——这是提醒你别偷它，**不是说其他步可以省**。改动再小，六步全走（产出物可短，步骤不可略）。"最低进方案挡"= 六步都走，不是只走 step 5。
+
 1. **写 plan** — 调 `Skill(superpowers:writing-plans)` 生成 `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`
 2. **派 critic 对抗审 plan** — 派子代理（`Agent(subagent_type=general-purpose)` 或 `Skill(codex:rescue)`），prompt 含「adversarially review this plan」，反馈拼回 plan 末尾
 3. **把 plan + critic 摘要发给用户，等明确批准** — 用户没说「按 plan 改 / 这个 plan 行 / go ahead」前**禁止动代码**
@@ -55,6 +57,7 @@ PR 开完后**默认停手**：把 PR 链接 + reviewer 摘要发给用户、报
 
 - **2026-06-08 PR #3034**（feishu_recruit-lite-fix 群 / nine 仓库）：用户问「删掉之后就不会出评估字段了是吗」是 sanity-check 问题。正确响应：「是，原因是 X。要改就改这两处：…，你说改我就动手。」错误响应（已发生）：直接 Edit + commit + push + PR + merge 一条龙 2.7 分钟搞完。
 - **2026-06-09 PR #3085**（feishu_recruit-lite-fix 群 / nine 仓库）：用户说「@阿飞 有几个显示问题我提一下你帮我改 1. … 2. 可以挪到其他属性吗，skill 里是怎么定义的 3. 加粗呢」——开头「你帮我改」+ 列表里夹问句，错把整段当任务清单一刀切直接开 PR。正确响应：先逐一回答 1/2/3 的问句和分析，然后说"我准备这样改 …，要我进方案挡吗？"。**永远不要再犯**。
+- **2026-06-15 测试用例生成 Skill 设计群**：改动小，跳过 step 1（`writing-plans` 写 plan 文件）和 step 2（critic 审 plan），只严格跑了 step 5（reviewer）就开 PR。错因：把 step 5 的"历史高发"强调误读成"step 5 是核心、1/2 可跳"。**六步无主次，"最低进方案挡"= 六步都走，不是只走 step 5。**
 
 ### DOTA 三国管线（用户说 `/dota …` 或「走 DOTA」时进入）
 
@@ -125,6 +128,8 @@ xray events 本身**不带** trace_id。如果用户主动从 GlitchTip / 监控
 ### 宿主代码访问的边界
 
 `/workspace/extra/vibe-coding/nine/` 是**可读可写**的真实挂载，跟其他子目录一样。安全护栏（`nanoclaw-host-guard.sh`）**只拦 Bash 工具**里的危险命令（具体说：`cd` / `pushd` / `git -C` / `find` / `xargs` 进入 `~/Desktop/vibe-coding/` 或 `/workspace/extra/vibe-coding/`），**不拦** Read / Edit / Write，更不会"禁止读这个目录"。要找 Nine 的代码、schema、API 实现，直接 Read / Grep 就行。不要凭印象编造"被护栏禁止"的理由。
+
+**查代码 / 讨论问题前先确认分支（强制）**：读 Nine 代码做分析、排查、讨论之前，先跑 `git -C ~/nanoclaw-worktrees/nine-dev rev-parse --abbrev-ref HEAD` 确认 worktree 当前分支，再跑 `cd ~/nanoclaw-worktrees/nine-dev && git fetch origin && git checkout dev && git pull origin dev` 拉到最新。然后**从 worktree 路径**（`~/nanoclaw-worktrees/nine-dev/`）读代码，**不要**从 `/workspace/extra/vibe-coding/nine/` 读——那是用户主目录挂载，可能在任意分支或有未提交改动，基于它的分析结论可能过时。
 
 ### 写代码 / 改 Nine 项目（强制规则）
 
