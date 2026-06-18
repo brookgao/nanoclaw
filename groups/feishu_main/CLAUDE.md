@@ -41,6 +41,7 @@ On every session start, read these files in order:
 - Answer questions and have conversations
 - Search the web and fetch content from URLs
 - **Read Feishu docs / wiki pages** with `mcp__feishu-blocks__feishu_get_document_blocks` — use this for any `*.feishu.cn/docx/*` or `*.feishu.cn/wiki/*` URL. **Do NOT use WebFetch for Feishu URLs** — those require OAuth and WebFetch will hit a login redirect and fail.
+- **Read Feishu doc comments / 批注** with `mcp__feishu-blocks__feishu_get_document_comments` — PM 在文档里划词写的评论/批注是正文之外的独立数据，`feishu_get_document_blocks` 读不到；要看评论必须用这个工具（传 docx token，默认自动取 局部+全文、已解决+未解决 全部评论，返回锚定原文 quote + 各回复纯文本）。
 - **Browse the web** with `agent-browser` — open pages, click, fill forms, take screenshots, extract data (run `agent-browser open <url>` to start, then `agent-browser snapshot -i` to see interactive elements)
 - Read and write files in your workspace
 - Run bash commands in your sandbox
