@@ -85,6 +85,7 @@ DOTA 是 Nine 项目的全质量管线（需求收敛 → spec → plan → 审�
 **铁律提醒**（来自 DOTA SKILL.md，你必须遵守）：
 - 禁止空谈：先读后说，结论 file:line（这条跟你顶部的「认知诚实」一致）
 - 禁止跳步：每 Phase 输出 ▶（进入）/ ✓（完成）标记
+- **Phase 边界回贴里程碑（必做）**：每跨入一个 Phase，先用 `send_message` 发一条单行里程碑，例：`✓ Phase 2 plan 完成 → ▶ Phase 3 审查（critic）`。实时工具细节仍走流式卡片；里程碑让用户随时看到推进、判断是否卡死。8 个 Phase ≈ 8 条，不要在 Phase 内部刷屏。
 - 大写入分块：见上面 #5
 - Phase 入口立即 Read：见上面 #1
 
