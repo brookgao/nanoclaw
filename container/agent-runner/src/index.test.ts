@@ -1,8 +1,39 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { MessageStream, drainIpcInput, _setIpcInputDir } from './index.js';
+import {
+  MessageStream,
+  drainIpcInput,
+  _setIpcInputDir,
+  getIdleCompactConfig,
+  extractContextTokens,
+  waitForIpcMessage,
+  IdleCompactController,
+  isDotaTrigger,
+} from './index.js';
+
+describe('isDotaTrigger', () => {
+  it('matches explicit DOTA trigger phrases', () => {
+    expect(isDotaTrigger('/dota 还价文案不一致')).toBe(true);
+    expect(isDotaTrigger('/dota-bugfix 列表页崩了')).toBe(true);
+    expect(isDotaTrigger('走 DOTA 把这个需求做了')).toBe(true);
+    expect(isDotaTrigger('DOTA 一下')).toBe(true);
+    expect(isDotaTrigger('上 superpowers')).toBe(true);
+    expect(isDotaTrigger('前面的 dota 流程你继续啊')).toBe(true);
+  });
+
+  it('is case-insensitive for dota / superpowers', () => {
+    expect(isDotaTrigger('/DOTA foo')).toBe(true);
+    expect(isDotaTrigger('上 SuperPowers')).toBe(true);
+  });
+
+  it('does not match ordinary messages', () => {
+    expect(isDotaTrigger('帮我看下这个 bug')).toBe(false);
+    expect(isDotaTrigger('endorota 是什么')).toBe(false);
+    expect(isDotaTrigger('')).toBe(false);
+  });
+});
 
 describe('MessageStream multimodal', () => {
   it('yields string content when no images', async () => {
@@ -95,5 +126,267 @@ describe('drainIpcInput multimodal', () => {
     );
     const out = drainIpcInput();
     expect(out).toEqual([{ text: 'ok' }]);
+  });
+});
+
+describe('getIdleCompactConfig', () => {
+  it('defaults threshold to 75% of auto-compact window, delay 30s, enabled', () => {
+    const cfg = getIdleCompactConfig({});
+    expect(cfg).toEqual({ enabled: true, thresholdTokens: 45000, delayMs: 30000 });
+  });
+
+  it('derives threshold from CLAUDE_CODE_AUTO_COMPACT_WINDOW', () => {
+    const cfg = getIdleCompactConfig({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000' });
+    expect(cfg.thresholdTokens).toBe(75000);
+  });
+
+  it('honors explicit threshold override', () => {
+    const cfg = getIdleCompactConfig({ NANOCLAW_IDLE_COMPACT_THRESHOLD: '20000' });
+    expect(cfg.thresholdTokens).toBe(20000);
+    expect(cfg.enabled).toBe(true);
+  });
+
+  it('disables when threshold is 0', () => {
+    const cfg = getIdleCompactConfig({ NANOCLAW_IDLE_COMPACT_THRESHOLD: '0' });
+    expect(cfg.enabled).toBe(false);
+  });
+
+  it('falls back to defaults on non-numeric values', () => {
+    const cfg = getIdleCompactConfig({
+      NANOCLAW_IDLE_COMPACT_THRESHOLD: 'abc',
+      NANOCLAW_IDLE_COMPACT_DELAY_MS: '',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'nope',
+    });
+    expect(cfg).toEqual({ enabled: true, thresholdTokens: 45000, delayMs: 30000 });
+  });
+
+  it('honors delay override', () => {
+    const cfg = getIdleCompactConfig({ NANOCLAW_IDLE_COMPACT_DELAY_MS: '5000' });
+    expect(cfg.delayMs).toBe(5000);
+  });
+});
+
+describe('extractContextTokens', () => {
+  it('sums input + cache read/creation + output from a main-thread assistant message', () => {
+    const msg = {
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: {
+        usage: {
+          input_tokens: 3,
+          cache_read_input_tokens: 11141,
+          cache_creation_input_tokens: 22630,
+          output_tokens: 100,
+        },
+      },
+    };
+    expect(extractContextTokens(msg)).toBe(33874);
+  });
+
+  it('returns null for non-assistant messages', () => {
+    expect(extractContextTokens({ type: 'result' })).toBeNull();
+  });
+
+  it('returns null for sidechain (subagent) assistant messages', () => {
+    const msg = {
+      type: 'assistant',
+      parent_tool_use_id: 'toolu_123',
+      message: { usage: { input_tokens: 5 } },
+    };
+    expect(extractContextTokens(msg)).toBeNull();
+  });
+
+  it('returns null when usage is missing', () => {
+    expect(
+      extractContextTokens({ type: 'assistant', parent_tool_use_id: null, message: {} }),
+    ).toBeNull();
+  });
+
+  it('treats missing usage fields as 0', () => {
+    const msg = {
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: { usage: { input_tokens: 7 } },
+    };
+    expect(extractContextTokens(msg)).toBe(7);
+  });
+});
+
+describe('waitForIpcMessage', () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ipc-wait-test-'));
+    _setIpcInputDir(tmp);
+  });
+  afterEach(() => {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('resolves with the message when one is pending', async () => {
+    fs.writeFileSync(
+      path.join(tmp, '1.json'),
+      JSON.stringify({ type: 'message', text: 'hello' }),
+    );
+    const result = await waitForIpcMessage();
+    expect(result).toEqual({ kind: 'message', message: { text: 'hello' } });
+  });
+
+  it('resolves close when _close sentinel exists', async () => {
+    fs.writeFileSync(path.join(tmp, '_close'), '');
+    const result = await waitForIpcMessage();
+    expect(result).toEqual({ kind: 'close' });
+  });
+
+  it('waits until a message arrives later', async () => {
+    setTimeout(() => {
+      fs.writeFileSync(
+        path.join(tmp, '2.json'),
+        JSON.stringify({ type: 'message', text: 'late' }),
+      );
+    }, 800);
+    const result = await waitForIpcMessage();
+    expect(result).toEqual({ kind: 'message', message: { text: 'late' } });
+  });
+});
+
+describe('IdleCompactController', () => {
+  const cfg = { enabled: true, thresholdTokens: 45000, delayMs: 30000 };
+  let pushed: number;
+  const pushCompact = () => {
+    pushed++;
+  };
+
+  beforeEach(() => {
+    pushed = 0;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('pushes /compact after the idle delay when context is over threshold', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    expect(c.onResult()).toBe(false);
+    expect(pushed).toBe(0);
+    vi.advanceTimersByTime(30000);
+    expect(pushed).toBe(1);
+    expect(c.compactInFlight).toBe(true);
+  });
+
+  it('does nothing when context is below threshold', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(10000);
+    c.onResult();
+    vi.advanceTimersByTime(60000);
+    expect(pushed).toBe(0);
+  });
+
+  it('does nothing when disabled', () => {
+    const c = new IdleCompactController(
+      { ...cfg, enabled: false },
+      pushCompact,
+    );
+    c.onContextTokens(50000);
+    c.onResult();
+    vi.advanceTimersByTime(60000);
+    expect(pushed).toBe(0);
+  });
+
+  it('cancels the pending compact when a user message arrives', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    c.onResult();
+    vi.advanceTimersByTime(15000);
+    c.onUserMessage();
+    vi.advanceTimersByTime(60000);
+    expect(pushed).toBe(0);
+  });
+
+  it('marks the next result as the compact turn exactly once', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    c.onResult();
+    vi.advanceTimersByTime(30000);
+    expect(c.compactInFlight).toBe(true);
+    c.onCompactBoundary();
+    expect(c.onResult()).toBe(true);
+    expect(c.compactInFlight).toBe(false);
+    // Follow-up turn is a normal result again
+    c.onContextTokens(8000);
+    expect(c.onResult()).toBe(false);
+  });
+
+  it('does not reschedule right after the compact turn completes', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    c.onResult();
+    vi.advanceTimersByTime(30000);
+    expect(pushed).toBe(1);
+    c.onResult(); // compact turn result — context still reported high
+    vi.advanceTimersByTime(60000);
+    expect(pushed).toBe(1);
+  });
+
+  it('reschedules (not duplicates) when results arrive back to back', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    c.onResult();
+    vi.advanceTimersByTime(15000);
+    c.onUserMessage(); // user activity cancels
+    c.onContextTokens(52000);
+    c.onResult(); // new turn done, schedule again
+    vi.advanceTimersByTime(30000);
+    expect(pushed).toBe(1);
+  });
+
+  it('delivers a real result normally when compact is queued but has not run yet', () => {
+    // Agent-teams turns emit several results; the turn's real final result
+    // can arrive after /compact was pushed but before it executed.
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    c.onResult();
+    vi.advanceTimersByTime(30000);
+    expect(c.compactInFlight).toBe(true);
+    // Real turn's result arrives — no compact_boundary seen yet
+    expect(c.onResult()).toBe(false);
+    // Compact actually runs afterwards
+    c.onCompactBoundary();
+    expect(c.onResult()).toBe(true);
+    expect(c.compactInFlight).toBe(false);
+  });
+
+  it('never swallows later results when the compact turn yields no result', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    c.onResult();
+    vi.advanceTimersByTime(30000);
+    expect(pushed).toBe(1);
+    // SDK never emits boundary nor a result for the pushed /compact
+    expect(c.onResult()).toBe(false);
+    expect(c.onResult()).toBe(false);
+    // And no further compacts are attempted while stuck in flight
+    vi.advanceTimersByTime(120000);
+    expect(pushed).toBe(1);
+  });
+
+  it('a user message while compact is in flight does not clear in-flight state', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    c.onResult();
+    vi.advanceTimersByTime(30000);
+    c.onUserMessage();
+    expect(c.compactInFlight).toBe(true);
+    c.onCompactBoundary();
+    expect(c.onResult()).toBe(true);
+  });
+
+  it('dispose cancels the pending timer', () => {
+    const c = new IdleCompactController(cfg, pushCompact);
+    c.onContextTokens(50000);
+    c.onResult();
+    c.dispose();
+    vi.advanceTimersByTime(60000);
+    expect(pushed).toBe(0);
   });
 });
