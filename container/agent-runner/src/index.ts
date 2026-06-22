@@ -600,6 +600,32 @@ export class IdleCompactController {
     return false;
   }
 
+  /**
+   * Force a /compact now, bypassing the idle timer — used to shrink the
+   * session right before a heavy DOTA run. No-op (returns false) if a compact
+   * is already in flight, or if the latest context is unknown or below the
+   * threshold (cold/small sessions don't need it, and a no-op /compact may
+   * never yield a boundary). The compact turn's result is suppressed by the
+   * existing onResult()/onCompactBoundary() path.
+   */
+  compactNow(): boolean {
+    if (this.inFlight) return false;
+    if (
+      this.contextTokens === undefined ||
+      this.contextTokens < this.cfg.thresholdTokens
+    ) {
+      return false;
+    }
+    this.cancel();
+    this.inFlight = true;
+    this.boundarySeen = false;
+    log(
+      `DOTA-start compact: context ~${this.contextTokens} tokens >= ${this.cfg.thresholdTokens}, sending /compact`,
+    );
+    this.pushCompact();
+    return true;
+  }
+
   get compactInFlight(): boolean {
     return this.inFlight;
   }

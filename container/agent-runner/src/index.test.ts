@@ -35,6 +35,43 @@ describe('isDotaTrigger', () => {
   });
 });
 
+describe('IdleCompactController.compactNow', () => {
+  const cfg = { enabled: true, thresholdTokens: 45000, delayMs: 30000 };
+
+  it('pushes /compact immediately when context is at/over threshold', () => {
+    const pushed: string[] = [];
+    const c = new IdleCompactController(cfg, () => pushed.push('/compact'));
+    c.onContextTokens(60000);
+    expect(c.compactNow()).toBe(true);
+    expect(pushed).toEqual(['/compact']);
+    expect(c.compactInFlight).toBe(true);
+  });
+
+  it('skips when context is below threshold', () => {
+    const pushed: string[] = [];
+    const c = new IdleCompactController(cfg, () => pushed.push('/compact'));
+    c.onContextTokens(1000);
+    expect(c.compactNow()).toBe(false);
+    expect(pushed).toEqual([]);
+  });
+
+  it('skips when context is unknown (cold start)', () => {
+    const pushed: string[] = [];
+    const c = new IdleCompactController(cfg, () => pushed.push('/compact'));
+    expect(c.compactNow()).toBe(false);
+    expect(pushed).toEqual([]);
+  });
+
+  it('skips when a compact is already in flight', () => {
+    const pushed: string[] = [];
+    const c = new IdleCompactController(cfg, () => pushed.push('/compact'));
+    c.onContextTokens(60000);
+    c.compactNow();
+    expect(c.compactNow()).toBe(false);
+    expect(pushed).toEqual(['/compact']);
+  });
+});
+
 describe('MessageStream multimodal', () => {
   it('yields string content when no images', async () => {
     const ms = new MessageStream();
