@@ -100,6 +100,36 @@ describe('formatTokenFooter', () => {
     });
     expect(out).toContain('ctx:28%');
   });
+
+  it('uses single-turn contextTokens for ctx%, not cumulative cache reads', () => {
+    // A 34-turn run: cumulative cacheRead/cacheCreation sums to ~1.9M, which
+    // the old formula divided by one 200k window → a misleading ctx:960%.
+    // The real per-turn context is ~55k → 28%.
+    const out = formatTokenFooter({
+      inputTokens: 47,
+      outputTokens: 17342,
+      cacheReadTokens: 1_811_860,
+      cacheCreationTokens: 107_547,
+      costUsd: 1.898,
+      numTurns: 34,
+      contextTokens: 55_000,
+    });
+    expect(out).toContain('ctx:28%');
+    expect(out).not.toContain('ctx:960%');
+  });
+
+  it('falls back to cumulative tokens for ctx% when contextTokens absent', () => {
+    // Single-turn runs (no contextTokens) keep the original behavior.
+    const out = formatTokenFooter({
+      inputTokens: 3,
+      outputTokens: 380,
+      cacheReadTokens: 55700,
+      cacheCreationTokens: 0,
+      costUsd: 10.201,
+      numTurns: 1,
+    });
+    expect(out).toContain('ctx:28%');
+  });
 });
 
 describe('appendTokenFooter', () => {

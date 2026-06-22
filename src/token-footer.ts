@@ -5,6 +5,11 @@ export interface TokenUsage {
   cacheCreationTokens: number;
   costUsd: number;
   numTurns: number;
+  // Live context size = the final turn's prompt (input + cache read + cache
+  // creation of the last assistant message). Use this for ctx% — the other
+  // token fields are cumulative across turns, so summing them for a multi-turn
+  // run overstates the window fill (e.g. 34 turns reported ctx:960%).
+  contextTokens?: number;
 }
 
 export function formatTokenCount(n: number): string {
@@ -18,6 +23,7 @@ const CONTEXT_WINDOW = 200_000;
 
 export function formatTokenFooter(usage: TokenUsage): string {
   const ctx =
+    usage.contextTokens ??
     usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
   const ctxPct = Math.round((ctx / CONTEXT_WINDOW) * 100);
   const parts = [

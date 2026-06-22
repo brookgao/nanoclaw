@@ -53,6 +53,8 @@ export interface TokenUsage {
   cacheCreationTokens: number;
   costUsd: number;
   numTurns: number;
+  // Live context size from the final turn; the footer uses this for ctx%.
+  contextTokens?: number;
 }
 
 export interface ContainerOutput {
