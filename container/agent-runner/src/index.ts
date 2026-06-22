@@ -714,6 +714,12 @@ async function runQuery(
       idleCompact.onUserMessage();
     }
     for (const m of messages) {
+      // Explicit DOTA trigger into a warm session: compact first so the heavy
+      // multi-phase run starts on a light context (compactNow no-ops if the
+      // context is already small / unknown).
+      if (isDotaTrigger(m.text) && idleCompact.compactNow()) {
+        log('DOTA trigger detected in IPC message; injected /compact before run');
+      }
       log(`Piping IPC message into active query (${m.text.length} chars)`);
       stream.push(m.text, m.images);
     }
