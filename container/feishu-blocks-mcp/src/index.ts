@@ -27,12 +27,33 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
+import { feishuRetryDelayMs, FEISHU_MAX_RETRIES } from "./backoff.js";
 
 // 飞书 OpenAPI 基础配置
 const FEISHU_BASE_URL = "https://open.feishu.cn/open-apis";
 
 // Bypass OneCLI proxy — it only handles Claude API; Feishu calls must go direct.
 const feishuHttp = axios.create({ proxy: false });
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Retry on Feishu rate limiting (HTTP 429). Covers every feishuHttp call
+// (append blocks, tables, images, sheets, bitable) from one place, so doc
+// writes back off instead of failing/blocking on the first 429.
+feishuHttp.interceptors.response.use(undefined, async (error) => {
+  const cfg = error?.config as
+    | (typeof error.config & { __retryCount?: number })
+    | undefined;
+  const status = error?.response?.status;
+  if (status === 429 && cfg) {
+    cfg.__retryCount = (cfg.__retryCount ?? 0) + 1;
+    if (cfg.__retryCount <= FEISHU_MAX_RETRIES) {
+      await sleep(feishuRetryDelayMs(cfg.__retryCount));
+      return feishuHttp(cfg);
+    }
+  }
+  return Promise.reject(error);
+});
 
 // 从环境变量获取配置
 const APP_ID = process.env.FEISHU_APP_ID || "";

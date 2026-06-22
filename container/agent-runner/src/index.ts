@@ -50,6 +50,9 @@ interface TokenUsage {
   cacheCreationTokens: number;
   costUsd: number;
   numTurns: number;
+  // Live context size from the final turn (not cumulative across turns); the
+  // host footer uses this for ctx% so multi-turn runs don't report bogus %.
+  contextTokens?: number;
 }
 
 interface ContainerOutput {
@@ -378,6 +381,63 @@ function formatTranscriptMarkdown(
   return lines.join('\n');
 }
 
+export interface IdleCompactConfig {
+  enabled: boolean;
+  thresholdTokens: number;
+  delayMs: number;
+}
+
+/**
+ * Idle-compact settings. Threshold defaults to 75% of the auto-compact
+ * window so we compact while idle, before the SDK's auto-compact would
+ * fire mid-request and make the user wait for it.
+ */
+export function getIdleCompactConfig(
+  env: Record<string, string | undefined>,
+): IdleCompactConfig {
+  const parse = (v: string | undefined): number | null => {
+    if (v === undefined || v.trim() === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const window = parse(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW) ?? 60000;
+  const thresholdTokens =
+    parse(env.NANOCLAW_IDLE_COMPACT_THRESHOLD) ?? Math.floor(window * 0.75);
+  const delayMs = parse(env.NANOCLAW_IDLE_COMPACT_DELAY_MS) ?? 30000;
+  return { enabled: thresholdTokens > 0, thresholdTokens, delayMs };
+}
+
+/**
+ * Current context size from a main-thread assistant message's usage:
+ * prompt tokens of its API call (fresh + cache read + cache creation)
+ * plus its own output, which becomes part of the next turn's prompt.
+ * Sidechain (subagent) messages report the subagent's context, not ours.
+ */
+export function extractContextTokens(message: unknown): number | null {
+  const m = message as {
+    type?: string;
+    parent_tool_use_id?: string | null;
+    message?: {
+      usage?: {
+        input_tokens?: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+        output_tokens?: number;
+      };
+    };
+  };
+  if (m?.type !== 'assistant') return null;
+  if (m.parent_tool_use_id) return null;
+  const usage = m.message?.usage;
+  if (!usage) return null;
+  return (
+    (usage.input_tokens ?? 0) +
+    (usage.cache_read_input_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0) +
+    (usage.output_tokens ?? 0)
+  );
+}
+
 /**
  * Check for _close sentinel.
  */
@@ -436,26 +496,171 @@ export function drainIpcInput(): Array<{ text: string; images?: ImageAttachment[
   }
 }
 
+export type IpcWaitResult =
+  | { kind: 'message'; message: { text: string; images?: ImageAttachment[] } }
+  | { kind: 'close' };
+
 /**
  * Wait for a new IPC message or _close sentinel.
- * Returns the first drained message, or null if _close.
  */
-function waitForIpcMessage(): Promise<{ text: string; images?: ImageAttachment[] } | null> {
+export function waitForIpcMessage(): Promise<IpcWaitResult> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
-        resolve(null);
+        resolve({ kind: 'close' });
         return;
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages[0]);
+        resolve({ kind: 'message', message: messages[0] });
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
     };
     poll();
   });
+}
+
+/**
+ * True when an inbound message explicitly asks to run the DOTA quality
+ * pipeline. Trigger phrases are fixed strings, so we can match them here
+ * (no LLM needed) and compact the session before the heavy run begins.
+ */
+export function isDotaTrigger(text: string): boolean {
+  if (!text) return false;
+  return (
+    /(^|\s)\/dota(-bugfix)?\b/i.test(text) ||
+    /走\s*dota/i.test(text) ||
+    /\bdota\s*一下/i.test(text) ||
+    /dota\s*流程/i.test(text) ||
+    /上\s*superpowers/i.test(text)
+  );
+}
+
+/**
+ * Decides when to compact the live session while it sits idle.
+ *
+ * The SDK query stays open for the whole session (streaming input), so
+ * compaction must happen inside the active query: after a turn's result,
+ * if the context is over the threshold and no user message arrives within
+ * the idle delay, pushCompact() forwards the SDK's built-in /compact slash
+ * command into the stream. The compact turn's own result must be suppressed
+ * by the caller (it was bot-initiated — nothing should reach the chat).
+ */
+export class IdleCompactController {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private inFlight = false;
+  private boundarySeen = false;
+  private contextTokens: number | undefined;
+
+  constructor(
+    private cfg: IdleCompactConfig,
+    private pushCompact: () => void,
+  ) {}
+
+  /** Latest main-thread context size (from assistant message usage). */
+  onContextTokens(tokens: number): void {
+    this.contextTokens = tokens;
+  }
+
+  /** A real user message arrived — the user is active, defer compaction. */
+  onUserMessage(): void {
+    this.cancel();
+  }
+
+  /** The SDK reported a compact boundary. */
+  onCompactBoundary(): void {
+    this.boundarySeen = true;
+  }
+
+  /**
+   * A turn's result arrived. Returns true when this result belongs to the
+   * compact turn this controller initiated (caller suppresses output and
+   * emits a session-update marker instead).
+   *
+   * The compact turn's result always follows a compact_boundary, so a
+   * result seen in-flight WITHOUT a boundary is a real turn's result (e.g.
+   * agent-teams turns emit several results and /compact may still be queued
+   * behind the active turn) — deliver it normally. If the pushed /compact
+   * never yields a boundary, we stay in-flight forever: idle compact is
+   * disabled for the rest of the session rather than risking swallowing a
+   * real reply. Narrow known window: an SDK auto-compact boundary arriving
+   * between our push and a real result could still misattribute that result.
+   */
+  onResult(): boolean {
+    if (this.inFlight) {
+      if (this.boundarySeen) {
+        this.inFlight = false;
+        this.boundarySeen = false;
+        return true;
+      }
+      return false;
+    }
+    this.schedule();
+    return false;
+  }
+
+  /**
+   * Force a /compact now, bypassing the idle timer — used to shrink the
+   * session right before a heavy DOTA run. No-op (returns false) if a compact
+   * is already in flight, or if the latest context is unknown or below the
+   * threshold (cold/small sessions don't need it, and a no-op /compact may
+   * never yield a boundary). The compact turn's result is suppressed by the
+   * existing onResult()/onCompactBoundary() path.
+   */
+  compactNow(): boolean {
+    if (this.inFlight) return false;
+    if (
+      this.contextTokens === undefined ||
+      this.contextTokens < this.cfg.thresholdTokens
+    ) {
+      return false;
+    }
+    this.cancel();
+    this.inFlight = true;
+    this.boundarySeen = false;
+    log(
+      `DOTA-start compact: context ~${this.contextTokens} tokens >= ${this.cfg.thresholdTokens}, sending /compact`,
+    );
+    this.pushCompact();
+    return true;
+  }
+
+  get compactInFlight(): boolean {
+    return this.inFlight;
+  }
+
+  dispose(): void {
+    this.cancel();
+  }
+
+  private schedule(): void {
+    if (!this.cfg.enabled || this.inFlight) return;
+    if (
+      this.contextTokens === undefined ||
+      this.contextTokens < this.cfg.thresholdTokens
+    ) {
+      return;
+    }
+    this.cancel();
+    const tokens = this.contextTokens;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.inFlight = true;
+      this.boundarySeen = false;
+      log(
+        `Idle compact: context ~${tokens} tokens >= ${this.cfg.thresholdTokens}, sending /compact`,
+      );
+      this.pushCompact();
+    }, this.cfg.delayMs);
+  }
+
+  private cancel(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
 }
 
 /**
@@ -483,6 +688,14 @@ async function runQuery(
   const stream = new MessageStream();
   stream.push(prompt, promptImages);
 
+  // Compact while idle (inside the live query): the SDK query stays open
+  // until _close, so this is the only place a proactive /compact can run
+  // without a user waiting on it.
+  const idleCompact = new IdleCompactController(
+    getIdleCompactConfig(sdkEnv),
+    () => stream.push('/compact'),
+  );
+
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
   let closedDuringQuery = false;
@@ -491,12 +704,22 @@ async function runQuery(
     if (shouldClose()) {
       log('Close sentinel detected during query, ending stream');
       closedDuringQuery = true;
+      idleCompact.dispose();
       stream.end();
       ipcPolling = false;
       return;
     }
     const messages = drainIpcInput();
+    if (messages.length > 0) {
+      idleCompact.onUserMessage();
+    }
     for (const m of messages) {
+      // Explicit DOTA trigger into a warm session: compact first so the heavy
+      // multi-phase run starts on a light context (compactNow no-ops if the
+      // context is already small / unknown).
+      if (isDotaTrigger(m.text) && idleCompact.compactNow()) {
+        log('DOTA trigger detected in IPC message; injected /compact before run');
+      }
       log(`Piping IPC message into active query (${m.text.length} chars)`);
       stream.push(m.text, m.images);
     }
@@ -526,6 +749,7 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  let lastContextTokens: number | undefined;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = path.join(GLOBAL_DIR, 'CLAUDE.md');
@@ -620,10 +844,26 @@ async function runQuery(
       lastAssistantUuid = (message as { uuid: string }).uuid;
     }
 
+    const contextTokens = extractContextTokens(message);
+    if (contextTokens !== null) {
+      lastContextTokens = contextTokens;
+      idleCompact.onContextTokens(contextTokens);
+    }
+
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
       log(`Session initialized: ${newSessionId}`);
       emitEvent('start', { prompt: prompt.slice(0, 500) });
+    }
+
+    if (
+      message.type === 'system' &&
+      (message as { subtype?: string }).subtype === 'compact_boundary'
+    ) {
+      idleCompact.onCompactBoundary();
+      // Pre-compact message uuids are not valid resume anchors anymore
+      lastAssistantUuid = undefined;
+      log('Compact boundary observed');
     }
 
     if (message.type === 'assistant') {
@@ -685,6 +925,14 @@ async function runQuery(
 
     if (message.type === 'result') {
       resultCount++;
+      if (idleCompact.onResult()) {
+        // This result belongs to the /compact turn we initiated (the
+        // boundary gate guarantees compaction happened) — nothing goes to
+        // the chat; report the session id to the host.
+        log('Idle compact turn complete');
+        writeOutput({ status: 'success', result: null, newSessionId });
+        continue;
+      }
       const textResult =
         'result' in message ? (message as { result?: string }).result : null;
       log(
@@ -710,6 +958,7 @@ async function runQuery(
             cacheCreationTokens: r.usage.cache_creation_input_tokens ?? 0,
             costUsd: r.total_cost_usd ?? 0,
             numTurns: r.num_turns ?? 0,
+            contextTokens: lastContextTokens,
           }
         : undefined;
       // Include usage in 'final' event so card-rendering channels (Feishu)
@@ -729,8 +978,9 @@ async function runQuery(
   }
 
   ipcPolling = false;
+  idleCompact.dispose();
   log(
-    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, contextTokens: ${lastContextTokens ?? 'unknown'}`,
   );
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
@@ -911,11 +1161,12 @@ async function main(): Promise<void> {
       log('Query ended, waiting for next IPC message...');
 
       // Wait for the next message or _close sentinel
-      const nextMessage = await waitForIpcMessage();
-      if (nextMessage === null) {
+      const waited = await waitForIpcMessage();
+      if (waited.kind !== 'message') {
         log('Close sentinel received, exiting');
         break;
       }
+      const nextMessage = waited.message;
 
       log(`Got new message (${nextMessage.text.length} chars), starting new query`);
       prompt = nextMessage.text;
