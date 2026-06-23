@@ -67,6 +67,7 @@ import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { appendTokenFooter } from './token-footer.js';
 import { acquireSingleInstanceLock } from './single-instance.js';
+import { checkLoopStall } from './loop-watchdog.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -532,6 +533,9 @@ async function runAgent(
   }
 }
 
+// Heartbeat for the loop watchdog: updated each iteration of startMessageLoop.
+let lastLoopTickAt = Date.now();
+
 async function startMessageLoop(): Promise<void> {
   if (messageLoopRunning) {
     logger.debug('Message loop already running, skipping duplicate start');
@@ -542,6 +546,7 @@ async function startMessageLoop(): Promise<void> {
   logger.info(`NanoClaw running (default trigger: ${DEFAULT_TRIGGER})`);
 
   while (true) {
+    lastLoopTickAt = Date.now();
     try {
       const jids = Object.keys(registeredGroups);
       const { messages, newTimestamp } = getNewMessages(
@@ -679,6 +684,19 @@ async function main(): Promise<void> {
     );
     process.exit(1);
   }
+
+  // Watchdog: if the message loop stops ticking (hung event loop / crashed
+  // loop), exit so launchd (KeepAlive) restarts a fresh instance.
+  const stallMs = Number(process.env.NANOCLAW_LOOP_STALL_MS ?? 180_000);
+  setInterval(() => {
+    checkLoopStall(Date.now(), lastLoopTickAt, stallMs, () => {
+      logger.error(
+        { stallMs, sinceMs: Date.now() - lastLoopTickAt },
+        '[watchdog] message loop stalled; exiting for restart',
+      );
+      process.exit(1);
+    });
+  }, 30_000).unref();
 
   ensureSystemRunning();
   initDatabase();
