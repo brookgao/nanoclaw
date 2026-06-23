@@ -66,6 +66,7 @@ import {
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { appendTokenFooter } from './token-footer.js';
+import { acquireSingleInstanceLock } from './single-instance.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -669,6 +670,16 @@ function ensureSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  const lockPort = Number(process.env.NANOCLAW_LOCK_PORT ?? 47291);
+  const lock = await acquireSingleInstanceLock(lockPort);
+  if (!lock.ok) {
+    logger.error(
+      { lockPort },
+      '[lock] another nanoclaw host instance is already running; exiting',
+    );
+    process.exit(1);
+  }
+
   ensureSystemRunning();
   initDatabase();
   logger.info('Database initialized');
