@@ -8,10 +8,12 @@ import net from 'net';
  */
 export function acquireSingleInstanceLock(
   port: number,
-): Promise<{ ok: true; server: net.Server } | { ok: false }> {
+): Promise<{ ok: true; server: net.Server } | { ok: false; code?: string }> {
   return new Promise((resolve) => {
     const server = net.createServer();
-    server.once('error', () => resolve({ ok: false }));
+    server.once('error', (err: NodeJS.ErrnoException) =>
+      resolve({ ok: false, code: err.code }),
+    );
     server.listen(port, '127.0.0.1', () => {
       resolve({ ok: true, server });
     });

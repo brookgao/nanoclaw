@@ -22,6 +22,7 @@ describe('acquireSingleInstanceLock', () => {
     if (first.ok) open.push(first.server);
     const second = await acquireSingleInstanceLock(PORT);
     expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.code).toBe('EADDRINUSE');
   });
 
   it('can re-acquire after the holder releases', async () => {

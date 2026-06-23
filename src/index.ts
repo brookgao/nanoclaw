@@ -68,6 +68,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { appendTokenFooter } from './token-footer.js';
 import { acquireSingleInstanceLock } from './single-instance.js';
 import { checkLoopStall } from './loop-watchdog.js';
+import { parseIntEnv } from './parse-env.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -675,19 +676,31 @@ function ensureSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
-  const lockPort = Number(process.env.NANOCLAW_LOCK_PORT ?? 47291);
+  const lockPort = parseIntEnv(process.env.NANOCLAW_LOCK_PORT, 47291);
   const lock = await acquireSingleInstanceLock(lockPort);
   if (!lock.ok) {
-    logger.error(
-      { lockPort },
-      '[lock] another nanoclaw host instance is already running; exiting',
-    );
+    if (lock.code === 'EADDRINUSE') {
+      logger.error(
+        { lockPort },
+        '[lock] another nanoclaw host instance is already running; exiting',
+      );
+    } else {
+      logger.error(
+        { lockPort, code: lock.code },
+        '[lock] failed to acquire single-instance lock; exiting',
+      );
+    }
     process.exit(1);
   }
 
-  // Watchdog: if the message loop stops ticking (hung event loop / crashed
-  // loop), exit so launchd (KeepAlive) restarts a fresh instance.
-  const stallMs = Number(process.env.NANOCLAW_LOOP_STALL_MS ?? 180_000);
+  // Watchdog: if the message loop stops *iterating* (its promise rejected, an
+  // await never resolves, or the loop threw out) for longer than the
+  // threshold, exit so launchd (KeepAlive) restarts a fresh instance.
+  // Limitation: this is an in-process setInterval, so it CANNOT fire if the
+  // event loop itself is fully (synchronously) blocked — it only catches a
+  // stopped-but-not-blocked loop. A true hung-process detector would need an
+  // out-of-process probe.
+  const stallMs = parseIntEnv(process.env.NANOCLAW_LOOP_STALL_MS, 180_000);
   setInterval(() => {
     checkLoopStall(Date.now(), lastLoopTickAt, stallMs, () => {
       logger.error(
