@@ -27,7 +27,9 @@
 
 ### 组件 1:单实例 flock 锁
 
-在 `main()` **最早处、`initDatabase()` 之前**对 `store/nanoclaw.lock` 抢一把**独占非阻塞** `flock`(`LOCK_EX | LOCK_NB`)——这样重复实例在碰数据库/WS 之前就退出。
+在 `main()` **最早处、`initDatabase()` 之前**绑定 `127.0.0.1:<端口>`(默认 `47291`,`NANOCLAW_LOCK_PORT` 可覆盖)作为单实例锁——OS 保证同端口仅一个进程能持有,这样重复实例在碰数据库/WS 之前就退出。
+
+> 实现说明:Node 无内置 `flock`,改用回环端口绑定取得同等"原子获取 + 进程死亡自动释放、无残留锁文件"语义(零依赖)。
 
 - **拿到锁** → 本进程是唯一实例,继续启动,锁持有到进程结束。
 - **拿不到锁**(`EWOULDBLOCK`/`EAGAIN`)→ 记一条清晰日志(`[lock] another host instance is already running; exiting`)→ `process.exit(1)`。
