@@ -820,8 +820,39 @@ export class FeishuChannel implements Channel {
       return;
     }
 
-    // 3) Parse
-    const parsed = parseInbound(m, this.botOpenId);
+    // 3) Parse — a merge_forward sent directly to a p2p chat expands into a
+    //    transcript instead of being dropped. In groups a bare forward can't
+    //    @-mention the bot, so we leave it to parseInbound (→ drop) and let the
+    //    reply-path in step 7 handle "reply to a forward + @bot".
+    let parsed: ParsedInbound | null;
+    let forwardAttachments: ImageAttachment[] | undefined;
+    const FORWARD_UNREAD_FALLBACK =
+      '[合并转发消息 — 暂时读不到内容，可把文字或截图发我]';
+    if (m.message_type === 'merge_forward' && m.chat_type === 'p2p') {
+      try {
+        const items = await this.fetchMergeForwardItems(m.message_id);
+        const expanded = await this.expandMergeForward(items);
+        const empty = expanded.transcript.includes('· 共 0 条]');
+        parsed = {
+          text: empty ? FORWARD_UNREAD_FALLBACK : expanded.transcript,
+          imageKeys: [],
+          botMentioned: false,
+        };
+        forwardAttachments = expanded.imageAttachments;
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message, msg_id: m.message_id },
+          '[feishu] merge_forward expand failed',
+        );
+        parsed = {
+          text: FORWARD_UNREAD_FALLBACK,
+          imageKeys: [],
+          botMentioned: false,
+        };
+      }
+    } else {
+      parsed = parseInbound(m, this.botOpenId);
+    }
     if (!parsed) {
       logger.debug(
         { message_type: m.message_type },
@@ -864,9 +895,11 @@ export class FeishuChannel implements Channel {
       }
     }
 
-    // 6) Process images if present
-    let attachments: ImageAttachment[] = [];
-    if (parsed.imageKeys.length > 0) {
+    // 6) Process images if present (merge_forward images already downloaded)
+    let attachments: ImageAttachment[] = forwardAttachments ?? [];
+    if (forwardAttachments) {
+      this.reactAck(m.message_id); // ack the forwarded chat record
+    } else if (parsed.imageKeys.length > 0) {
       this.reactAck(m.message_id); // 👀 immediately
       const result = await processImageKeys(
         parsed.imageKeys,
@@ -942,9 +975,26 @@ export class FeishuChannel implements Channel {
             }
           }
 
-          // Non-file parents: surface quoted content (text / post / wiki card /
-          // share_chat / etc.) so the agent sees what the user is referring to.
-          if (parentMsg.msg_type !== 'file') {
+          // Replied-to a merged-forward chat record: expand its children.
+          // Container ordering in items[] isn't guaranteed, so identify the
+          // container by matching the fetched parent_id rather than items[0].
+          const container = parentRes?.data?.items?.find(
+            (it: ForwardItem) => it.message_id === m.parent_id,
+          );
+          if (container?.msg_type === 'merge_forward') {
+            const expanded = await this.expandMergeForward(
+              parentRes.data.items,
+            );
+            cleanedText += `\n\n[引用的合并转发记录]\n${expanded.transcript}`;
+            attachments = attachments.concat(expanded.imageAttachments);
+            replyToInfo = {
+              messageId: m.parent_id,
+              content: expanded.transcript.slice(0, 500),
+              senderName: '',
+            };
+          } else if (parentMsg.msg_type !== 'file') {
+            // Non-file parents: surface quoted content (text / post / wiki card
+            // / share_chat / etc.) so the agent sees what the user refers to.
             const parentSenderId = parentMsg.sender?.id ?? '';
             const parentSenderName = parentSenderId
               ? await this.resolveSenderName(parentSenderId).catch(

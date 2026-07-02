@@ -320,6 +320,182 @@ describe('expandMergeForward', () => {
   });
 });
 
+describe('FeishuChannel merge_forward wiring', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  const mfItems = () => ({
+    data: {
+      items: [
+        {
+          message_id: 'mf',
+          msg_type: 'merge_forward',
+          create_time: '1',
+          body: { content: '{"content":"Merged and Forwarded Message"}' },
+        },
+        {
+          message_id: 'c1',
+          msg_type: 'text',
+          create_time: '2',
+          sender: { id: 'ou_a' },
+          body: { content: JSON.stringify({ text: '会话内容一' }) },
+        },
+        {
+          message_id: 'c2',
+          msg_type: 'image',
+          create_time: '3',
+          sender: { id: 'ou_a' },
+          body: { content: JSON.stringify({ image_key: 'img_1' }) },
+        },
+      ],
+    },
+  });
+
+  it('group reply to merge_forward + @bot → transcript appended, image attached', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) =>
+      (({ ou_a: '建波' } as Record<string, string>)[id] ?? id));
+    ch.downloadImage = vi.fn(async () =>
+      readFileSync(
+        '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
+      ),
+    );
+    ch.client = {
+      request: vi.fn(async () => mfItems()),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        chat_type: 'group',
+        chat_id: 'oc_g1',
+        msg_type: 'text',
+        content: JSON.stringify({ text: '@_user_1 你能读到这段记录吗' }),
+        parent_id: 'mf',
+        mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }],
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('建波: 会话内容一');
+    expect(msg.content).toContain('建波: [图片]');
+    expect(msg.images).toHaveLength(1);
+    expect(msg.reply_to_message_content).toContain('会话内容一');
+  });
+
+  it('p2p direct merge_forward → not dropped, expanded transcript delivered', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) =>
+      (({ ou_a: '建波', ou_b: 'Nine-dev' } as Record<string, string>)[id] ??
+        id));
+    ch.downloadImage = vi.fn(async () =>
+      readFileSync(
+        '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
+      ),
+    );
+    ch.client = {
+      request: vi.fn(async () => ({
+        data: {
+          items: [
+            {
+              message_id: 'mf',
+              msg_type: 'merge_forward',
+              create_time: '1',
+              body: { content: '{"content":"Merged and Forwarded Message"}' },
+            },
+            {
+              message_id: 'c1',
+              msg_type: 'text',
+              create_time: '2',
+              sender: { id: 'ou_a' },
+              body: { content: JSON.stringify({ text: '生成一个prd' }) },
+            },
+            {
+              message_id: 'c2',
+              msg_type: 'text',
+              create_time: '3',
+              sender: { id: 'ou_b' },
+              body: { content: JSON.stringify({ text: 'MRD 已完整读取' }) },
+            },
+          ],
+        },
+      })),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'merge_forward',
+        message_id: 'mf',
+        content: '{"content":"Merged and Forwarded Message"}',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('建波: 生成一个prd');
+    expect(msg.content).toContain('Nine-dev: MRD 已完整读取');
+    expect(ch.client.request).toHaveBeenCalledWith(
+      expect.objectContaining({ url: '/open-apis/im/v1/messages/mf' }),
+    );
+  });
+
+  it('p2p merge_forward whose GET fails → delivers a fallback, not silent drop', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) => id);
+    ch.client = {
+      request: vi.fn(async () => {
+        throw Object.assign(new Error('rate limited'), { statusCode: 429 });
+      }),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'merge_forward',
+        message_id: 'mf',
+        content: '{"content":"Merged and Forwarded Message"}',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][1].content).toContain('读不到内容');
+  });
+
+  it('group bare merge_forward (no @bot) → dropped without any GET', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.client = {
+      request: vi.fn(async () => mfItems()),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        chat_type: 'group',
+        chat_id: 'oc_g2',
+        msg_type: 'merge_forward',
+        message_id: 'mf',
+        content: '{"content":"Merged and Forwarded Message"}',
+      }),
+    );
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(ch.client.request).not.toHaveBeenCalled();
+  });
+});
+
 describe('FeishuChannel construction', () => {
   beforeEach(() => {
     process.env.FEISHU_APP_ID = 'cli_test';
