@@ -715,6 +715,87 @@ export class FeishuChannel implements Channel {
     return openId;
   }
 
+  private async fetchMergeForwardItems(
+    messageId: string,
+  ): Promise<ForwardItem[]> {
+    const res: any = await this.client.request({
+      method: 'GET',
+      url: `/open-apis/im/v1/messages/${messageId}`,
+    });
+    return res?.data?.items ?? [];
+  }
+
+  // Expand a merge_forward message's items[] into a readable transcript + inline
+  // images (both capped). Shared by the reply-path and the direct-forward path.
+  private async expandMergeForward(items: ForwardItem[]): Promise<{
+    transcript: string;
+    imageAttachments: ImageAttachment[];
+    truncated: { messages: boolean; imagesDropped: number };
+    unreadableCards: number;
+  }> {
+    const plan = planForwardExpansion(items, this.botOpenId, {
+      maxMessages: MAX_FORWARD_MESSAGES,
+      maxChars: MAX_FORWARD_CHARS,
+      maxImages: MAX_FORWARD_IMAGES,
+    });
+
+    // Resolve unique sender names (cached in nameCache, dedup by open_id).
+    const nameMap = new Map<string, string>();
+    const uniqueIds = [
+      ...new Set(plan.lines.map((l) => l.senderOpenId).filter(Boolean)),
+    ];
+    await Promise.all(
+      uniqueIds.map(async (id) => {
+        nameMap.set(id, await this.resolveSenderName(id).catch(() => id));
+      }),
+    );
+
+    // Download images: each key must be fetched with its own child message_id.
+    const keyToMsg = new Map(
+      plan.imageRequests.map((r) => [r.imageKey, r.messageId]),
+    );
+    const keys = plan.imageRequests.map((r) => r.imageKey);
+    const imageAttachments: ImageAttachment[] = keys.length
+      ? (
+          await processImageKeys(
+            keys,
+            (k) => this.downloadImage(keyToMsg.get(k) ?? '', k),
+            logger,
+          )
+        ).attachments
+      : [];
+
+    const bodyLines = plan.lines.map((l) => {
+      const name = l.senderOpenId
+        ? nameMap.get(l.senderOpenId) ?? l.senderOpenId
+        : '';
+      return name ? `${name}: ${l.text}` : l.text;
+    });
+
+    const notes: string[] = [];
+    if (plan.truncated.messages) notes.push('记录较长，仅展开前部分消息');
+    if (plan.truncated.imagesDropped > 0)
+      notes.push(`含较多图片，仅处理前 ${MAX_FORWARD_IMAGES} 张`);
+    if (plan.unreadableCards > 0)
+      notes.push(
+        `含 ${plan.unreadableCards} 条卡片消息，飞书 API 无法读取其内容`,
+      );
+
+    const header = `[合并转发的聊天记录 · 共 ${plan.lines.length} 条]`;
+    const transcript = [
+      header,
+      ...bodyLines,
+      ...(notes.length ? [`[系统: ${notes.join('；')}]`] : []),
+    ].join('\n');
+
+    return {
+      transcript,
+      imageAttachments,
+      truncated: plan.truncated,
+      unreadableCards: plan.unreadableCards,
+    };
+  }
+
   // Exposed for tests; also called from WS event handler.
   async handleEvent(payload: any): Promise<void> {
     const ev = payload?.event;

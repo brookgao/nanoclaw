@@ -244,6 +244,82 @@ describe('planForwardExpansion', () => {
   });
 });
 
+describe('expandMergeForward', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  it('assembles transcript with resolved names, images, card marker and hint', async () => {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) =>
+      (({ ou_a: '建波', ou_b: 'Nine-dev' } as Record<string, string>)[id] ??
+        id));
+    ch.downloadImage = vi.fn(async () =>
+      readFileSync(
+        '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
+      ),
+    );
+
+    const items = [
+      {
+        message_id: 'mf',
+        msg_type: 'merge_forward',
+        create_time: '1',
+        body: { content: '{"content":"Merged and Forwarded Message"}' },
+      },
+      {
+        message_id: 'c1',
+        msg_type: 'text',
+        create_time: '2',
+        sender: { id: 'ou_a' },
+        body: { content: JSON.stringify({ text: '生成一个prd' }) },
+      },
+      {
+        message_id: 'c2',
+        msg_type: 'image',
+        create_time: '3',
+        sender: { id: 'ou_b' },
+        body: { content: JSON.stringify({ image_key: 'img_1' }) },
+      },
+      {
+        message_id: 'c3',
+        msg_type: 'interactive',
+        create_time: '4',
+        sender: { id: 'ou_b' },
+        body: { content: JSON.stringify({ elements: [] }) },
+      },
+    ];
+    const out = await ch.expandMergeForward(items);
+    expect(out.transcript).toContain('[合并转发的聊天记录 · 共 3 条]');
+    expect(out.transcript).toContain('建波: 生成一个prd');
+    expect(out.transcript).toContain('Nine-dev: [图片]');
+    expect(out.transcript).toContain('Nine-dev: [卡片消息]');
+    expect(out.transcript).toContain('飞书 API 无法读取其内容');
+    expect(out.imageAttachments).toHaveLength(1);
+    expect(out.imageAttachments[0].sourceKey).toBe('img_1');
+    // image downloaded with the CHILD message_id, not the container's
+    expect(ch.downloadImage).toHaveBeenCalledWith('c2', 'img_1');
+  });
+
+  it('fetchMergeForwardItems returns data.items from GET', async () => {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    ch.client = {
+      request: vi.fn(async () => ({ data: { items: [{ message_id: 'x' }] } })),
+    };
+    const items = await ch.fetchMergeForwardItems('om_mf');
+    expect(items).toEqual([{ message_id: 'x' }]);
+    expect(ch.client.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        url: '/open-apis/im/v1/messages/om_mf',
+      }),
+    );
+  });
+});
+
 describe('FeishuChannel construction', () => {
   beforeEach(() => {
     process.env.FEISHU_APP_ID = 'cli_test';
