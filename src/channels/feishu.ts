@@ -572,6 +572,11 @@ export function planForwardExpansion(
     const msgType = child.msg_type ?? '';
     const content = child.body?.content ?? '';
     let text: string;
+    // Side effects (image collection, card counting) are deferred until AFTER
+    // the char-cap decision, so a message dropped at the boundary never leaves
+    // a dangling attachment or an inflated unreadable-card count.
+    const pendingImages: string[] = [];
+    let isCard = false;
 
     if (msgType === 'text' || msgType === 'post') {
       const parsed = parseInbound(
@@ -579,19 +584,19 @@ export function planForwardExpansion(
         botOpenId,
       );
       text = parsed?.text || `[${msgType}]`;
-      for (const key of parsed?.imageKeys ?? []) collectImage(child.message_id, key);
+      for (const key of parsed?.imageKeys ?? []) pendingImages.push(key);
     } else if (msgType === 'image') {
       text = '[图片]';
       try {
         const key = JSON.parse(content)?.image_key;
-        if (key) collectImage(child.message_id, key);
+        if (key) pendingImages.push(key);
       } catch {
         /* keep placeholder */
       }
     } else if (msgType === 'interactive') {
       // Card content is unreadable via API — render a marker, skip its image.
       text = '[卡片消息]';
-      unreadableCards++;
+      isCard = true;
     } else if (msgType === 'file') {
       let name = 'unknown';
       try {
@@ -610,6 +615,8 @@ export function planForwardExpansion(
     }
     chars += text.length;
     lines.push({ senderOpenId, text });
+    if (isCard) unreadableCards++;
+    for (const key of pendingImages) collectImage(child.message_id, key);
   }
 
   return {
@@ -732,6 +739,7 @@ export class FeishuChannel implements Channel {
     imageAttachments: ImageAttachment[];
     truncated: { messages: boolean; imagesDropped: number };
     unreadableCards: number;
+    lineCount: number;
   }> {
     const plan = planForwardExpansion(items, this.botOpenId, {
       maxMessages: MAX_FORWARD_MESSAGES,
@@ -740,15 +748,20 @@ export class FeishuChannel implements Channel {
     });
 
     // Resolve unique sender names (cached in nameCache, dedup by open_id).
+    // Bound concurrency: a large digest can have many distinct senders on a
+    // cold cache, and this codebase is 429-sensitive.
     const nameMap = new Map<string, string>();
     const uniqueIds = [
       ...new Set(plan.lines.map((l) => l.senderOpenId).filter(Boolean)),
     ];
-    await Promise.all(
-      uniqueIds.map(async (id) => {
-        nameMap.set(id, await this.resolveSenderName(id).catch(() => id));
-      }),
-    );
+    const NAME_CONCURRENCY = 8;
+    for (let i = 0; i < uniqueIds.length; i += NAME_CONCURRENCY) {
+      await Promise.all(
+        uniqueIds.slice(i, i + NAME_CONCURRENCY).map(async (id) => {
+          nameMap.set(id, await this.resolveSenderName(id).catch(() => id));
+        }),
+      );
+    }
 
     // Download images: each key must be fetched with its own child message_id.
     const keyToMsg = new Map(
@@ -793,6 +806,7 @@ export class FeishuChannel implements Channel {
       imageAttachments,
       truncated: plan.truncated,
       unreadableCards: plan.unreadableCards,
+      lineCount: plan.lines.length,
     };
   }
 
@@ -832,9 +846,11 @@ export class FeishuChannel implements Channel {
       try {
         const items = await this.fetchMergeForwardItems(m.message_id);
         const expanded = await this.expandMergeForward(items);
-        const empty = expanded.transcript.includes('· 共 0 条]');
         parsed = {
-          text: empty ? FORWARD_UNREAD_FALLBACK : expanded.transcript,
+          text:
+            expanded.lineCount === 0
+              ? FORWARD_UNREAD_FALLBACK
+              : expanded.transcript,
           imageKeys: [],
           botMentioned: false,
         };
@@ -959,8 +975,24 @@ export class FeishuChannel implements Channel {
           method: 'GET',
           url: `/open-apis/im/v1/messages/${m.parent_id}`,
         });
-        const parentMsg = parentRes?.data?.items?.[0];
-        if (parentMsg) {
+        const items = parentRes?.data?.items ?? [];
+        // Container ordering in items[] isn't guaranteed, so identify the
+        // container by matching the fetched parent_id rather than items[0].
+        const container =
+          items.find((it: ForwardItem) => it.message_id === m.parent_id) ??
+          items[0];
+        if (container?.msg_type === 'merge_forward') {
+          // Replied-to a merged-forward chat record: expand its children.
+          const expanded = await this.expandMergeForward(items);
+          cleanedText += `\n\n[引用的合并转发记录]\n${expanded.transcript}`;
+          attachments = attachments.concat(expanded.imageAttachments);
+          replyToInfo = {
+            messageId: m.parent_id,
+            content: expanded.transcript.slice(0, 500),
+            senderName: '',
+          };
+        } else if (container) {
+          const parentMsg = container;
           // File path (preserved): pull file_key from a replied-to file message.
           if (
             !fileKey &&
@@ -975,24 +1007,7 @@ export class FeishuChannel implements Channel {
             }
           }
 
-          // Replied-to a merged-forward chat record: expand its children.
-          // Container ordering in items[] isn't guaranteed, so identify the
-          // container by matching the fetched parent_id rather than items[0].
-          const container = parentRes?.data?.items?.find(
-            (it: ForwardItem) => it.message_id === m.parent_id,
-          );
-          if (container?.msg_type === 'merge_forward') {
-            const expanded = await this.expandMergeForward(
-              parentRes.data.items,
-            );
-            cleanedText += `\n\n[引用的合并转发记录]\n${expanded.transcript}`;
-            attachments = attachments.concat(expanded.imageAttachments);
-            replyToInfo = {
-              messageId: m.parent_id,
-              content: expanded.transcript.slice(0, 500),
-              senderName: '',
-            };
-          } else if (parentMsg.msg_type !== 'file') {
+          if (parentMsg.msg_type !== 'file') {
             // Non-file parents: surface quoted content (text / post / wiki card
             // / share_chat / etc.) so the agent sees what the user refers to.
             const parentSenderId = parentMsg.sender?.id ?? '';

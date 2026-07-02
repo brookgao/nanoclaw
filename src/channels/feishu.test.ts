@@ -233,6 +233,31 @@ describe('planForwardExpansion', () => {
     expect(plan.truncated.messages).toBe(true);
   });
 
+  it('char cap: message dropped at the boundary does not leak its image', () => {
+    const items: any[] = [
+      { message_id: 'mf', msg_type: 'merge_forward', create_time: '0' },
+      {
+        message_id: 'c1',
+        msg_type: 'text',
+        create_time: '1',
+        sender: { id: 'ou_a' },
+        body: { content: JSON.stringify({ text: 'abcde' }) },
+      },
+      {
+        message_id: 'c2',
+        msg_type: 'image',
+        create_time: '2',
+        sender: { id: 'ou_a' },
+        body: { content: JSON.stringify({ image_key: 'imgX' }) },
+      },
+    ];
+    const plan = planForwardExpansion(items, null, { maxChars: 5 });
+    expect(plan.lines).toHaveLength(1);
+    expect(plan.truncated.messages).toBe(true);
+    // the dropped image message must NOT have leaked an image request
+    expect(plan.imageRequests).toEqual([]);
+  });
+
   it('returns empty for container-only / empty items', () => {
     expect(planForwardExpansion([], null).lines).toEqual([]);
     expect(
@@ -387,6 +412,62 @@ describe('FeishuChannel merge_forward wiring', () => {
     expect(msg.content).toContain('建波: [图片]');
     expect(msg.images).toHaveLength(1);
     expect(msg.reply_to_message_content).toContain('会话内容一');
+  });
+
+  it('reply to merge_forward whose file child is items[0] → expands, no spurious file download', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) => id);
+    ch.downloadFile = vi.fn(async () => Buffer.from('should-not-be-called'));
+    ch.client = {
+      request: vi.fn(async () => ({
+        data: {
+          items: [
+            // file child at items[0] — container is NOT first
+            {
+              message_id: 'cf',
+              msg_type: 'file',
+              create_time: '2',
+              sender: { id: 'ou_a' },
+              body: {
+                content: JSON.stringify({ file_key: 'fk', file_name: 'a.md' }),
+              },
+            },
+            {
+              message_id: 'mf',
+              msg_type: 'merge_forward',
+              create_time: '1',
+              body: { content: '{"content":"Merged and Forwarded Message"}' },
+            },
+            {
+              message_id: 'c1',
+              msg_type: 'text',
+              create_time: '3',
+              sender: { id: 'ou_a' },
+              body: { content: JSON.stringify({ text: '内容X' }) },
+            },
+          ],
+        },
+      })),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        chat_type: 'group',
+        chat_id: 'oc_g3',
+        msg_type: 'text',
+        content: JSON.stringify({ text: '@_user_1 读下这段' }),
+        parent_id: 'mf',
+        mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }],
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][1].content).toContain('内容X');
+    // the forwarded file child must NOT be mistaken for a replied-to file
+    expect(ch.downloadFile).not.toHaveBeenCalled();
   });
 
   it('p2p direct merge_forward → not dropped, expanded transcript delivered', async () => {
