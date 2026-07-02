@@ -1808,3 +1808,180 @@ describe('FeishuChannel.sendFile', () => {
     ).rejects.toThrow(/does not exist/);
   });
 });
+
+describe('FeishuChannel onAgentEvent notice', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  const noticeEvent = (kind: 'rate_limit' | 'task', text: string) => ({
+    type: 'agent_event' as const,
+    chatJid: 'feishu:oc_g1',
+    runId: 'run-1',
+    seq: 5,
+    timestamp: Date.now(),
+    kind: 'notice' as const,
+    payload: { kind, text },
+  });
+
+  const seedSession = (ch: any, over: Record<string, unknown> = {}) =>
+    ch.cardSessions.set('feishu:oc_g1', {
+      runId: 'run-1',
+      messageId: 'om_card',
+      startedAt: Date.now(),
+      prompt: 'p',
+      toolEvents: [{ tool: 'Bash', args: {}, toolUseId: 't1', status: 'running' }],
+      pendingPatch: false,
+      verbose: false,
+      ...over,
+    });
+
+  it('stores noticeText + noticeKind on the active card session', async () => {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    ch.client = {
+      im: { message: { patch: vi.fn().mockResolvedValue({ code: 0 }) } },
+    };
+    seedSession(ch);
+    await ch.onAgentEvent(
+      'feishu:oc_g1',
+      noticeEvent('rate_limit', '账号限流中，等待重试…'),
+    );
+    const s = ch.cardSessions.get('feishu:oc_g1');
+    expect(s.noticeText).toBe('账号限流中，等待重试…');
+    expect(s.noticeKind).toBe('rate_limit');
+  });
+
+  it('a tool_use clears a rate_limit notice but keeps a task notice', async () => {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    ch.client = {
+      im: { message: { patch: vi.fn().mockResolvedValue({ code: 0 }) } },
+    };
+    // rate_limit notice → cleared by next tool_use
+    seedSession(ch, { noticeText: '账号限流中，等待重试…', noticeKind: 'rate_limit' });
+    await ch.onAgentEvent('feishu:oc_g1', {
+      type: 'agent_event', chatJid: 'feishu:oc_g1', runId: 'run-1', seq: 6,
+      timestamp: Date.now(), kind: 'tool_use',
+      payload: { tool: 'Read', args: {}, toolUseId: 't2' },
+    });
+    expect(ch.cardSessions.get('feishu:oc_g1').noticeText).toBeUndefined();
+
+    // task notice → NOT cleared by tool_use (progress should persist)
+    seedSession(ch, { noticeText: '子任务：审查中', noticeKind: 'task' });
+    await ch.onAgentEvent('feishu:oc_g1', {
+      type: 'agent_event', chatJid: 'feishu:oc_g1', runId: 'run-1', seq: 7,
+      timestamp: Date.now(), kind: 'tool_use',
+      payload: { tool: 'Read', args: {}, toolUseId: 't3' },
+    });
+    expect(ch.cardSessions.get('feishu:oc_g1').noticeText).toBe('子任务：审查中');
+  });
+
+  it('renders the notice into the card subtitle (concise + verbose)', async () => {
+    _initTestDatabase();
+    try {
+      for (const verbose of [false, true]) {
+        const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+        const createSpy = vi
+          .fn()
+          .mockResolvedValue({ code: 0, data: { message_id: 'om_x' } });
+        ch.client = {
+          im: {
+            message: {
+              create: createSpy,
+              patch: vi.fn().mockResolvedValue({ code: 0 }),
+              delete: vi.fn().mockResolvedValue({ code: 0 }),
+            },
+          },
+        };
+        // running session, no card yet → notice lazily creates it via createCard.
+        // runId must match noticeEvent() (run-1) or the runId guard drops it.
+        ch.cardSessions.set('feishu:oc_g1', {
+          runId: 'run-1', messageId: '', startedAt: Date.now(), prompt: 'p',
+          toolEvents: [], pendingPatch: false, verbose,
+        });
+        await ch.onAgentEvent('feishu:oc_g1', noticeEvent('rate_limit', '账号限流中，等待重试…'));
+        expect(createSpy).toHaveBeenCalledTimes(1);
+        const card = JSON.parse(createSpy.mock.calls[0][0].data.content);
+        expect(card.header.subtitle.content).toContain('账号限流中');
+        const s = ch.cardSessions.get('feishu:oc_g1');
+        if (s?.heartbeatTimer) clearInterval(s.heartbeatTimer);
+      }
+    } finally {
+      _closeDatabase();
+    }
+  });
+
+  it('zero-tool run after a notice patches the answer INTO the notice card (no delete-race, no zombie, no dup)', async () => {
+    _initTestDatabase();
+    try {
+      const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+      const createSpy = vi
+        .fn()
+        .mockResolvedValue({ code: 0, data: { message_id: 'om_notice' } });
+      const patchSpy = vi.fn().mockResolvedValue({ code: 0 });
+      const deleteSpy = vi.fn().mockResolvedValue({ code: 0 });
+      ch.client = {
+        im: { message: { create: createSpy, patch: patchSpy, delete: deleteSpy } },
+      };
+      const ev = (kind: any, payload: any) => ({
+        type: 'agent_event' as const, chatJid: 'feishu:oc_g1', runId: 'run-z',
+        seq: 1, timestamp: Date.now(), kind, payload,
+      });
+      await ch.onAgentEvent('feishu:oc_g1', ev('start', { prompt: 'hi' }));
+      await ch.onAgentEvent('feishu:oc_g1', ev('notice', { kind: 'rate_limit', text: '账号限流中，等待重试…' }));
+      expect(createSpy).toHaveBeenCalledTimes(1); // notice lazily created a card
+      expect(getActiveCards()).toHaveLength(1);
+
+      await ch.onAgentEvent('feishu:oc_g1', ev('final', { text: '2+2=4' }));
+      // Answer is patched into the existing notice card — NOT deleted (deleting
+      // would race the suppressed stdout copy and drop the answer entirely).
+      expect(patchSpy).toHaveBeenCalled();
+      expect(deleteSpy).not.toHaveBeenCalled();
+      const patched = JSON.parse(
+        patchSpy.mock.calls[patchSpy.mock.calls.length - 1][0].data.content,
+      );
+      const rendered = JSON.stringify(patched);
+      expect(rendered).toContain('2+2=4'); // final answer lives in the card
+      expect(getActiveCards()).toHaveLength(0); // run done → active row cleared (no zombie)
+      expect(createSpy).toHaveBeenCalledTimes(1); // no second card
+      expect(ch.cardSessions.get('feishu:oc_g1')).toBeUndefined();
+    } finally {
+      _closeDatabase();
+    }
+  });
+
+  it('concise running card shows the current tool in the subtitle (spec A2)', async () => {
+    _initTestDatabase();
+    try {
+      const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+      const createSpy = vi
+        .fn()
+        .mockResolvedValue({ code: 0, data: { message_id: 'om_t' } });
+      ch.client = {
+        im: {
+          message: {
+            create: createSpy,
+            patch: vi.fn().mockResolvedValue({ code: 0 }),
+            delete: vi.fn().mockResolvedValue({ code: 0 }),
+          },
+        },
+      };
+      const ev = (kind: any, payload: any) => ({
+        type: 'agent_event' as const, chatJid: 'feishu:oc_g1', runId: 'run-t',
+        seq: 1, timestamp: Date.now(), kind, payload,
+      });
+      await ch.onAgentEvent('feishu:oc_g1', ev('start', { prompt: 'hi' }));
+      // concise mode (default verbose=false) hides the tool list; the subtitle
+      // must still surface the running tool so a long call isn't just a timer.
+      await ch.onAgentEvent('feishu:oc_g1', ev('tool_use', { tool: 'Bash', args: {}, toolUseId: 't1' }));
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      const card = JSON.parse(createSpy.mock.calls[0][0].data.content);
+      expect(card.header.subtitle.content).toContain('Bash');
+      const s = ch.cardSessions.get('feishu:oc_g1');
+      if (s?.heartbeatTimer) clearInterval(s.heartbeatTimer);
+    } finally {
+      _closeDatabase();
+    }
+  });
+});

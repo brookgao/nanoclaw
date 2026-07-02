@@ -439,6 +439,57 @@ export function extractContextTokens(message: unknown): number | null {
 }
 
 /**
+ * Map SDK stream messages that would otherwise leave the card frozen at
+ * "思考中" into a user-visible notice:
+ *  - rate_limit_event with status 'rejected' → "被限流" (allowed/allowed_warning
+ *    are normal heartbeats, ignored — SDKRateLimitInfo.status, sdk.d.ts).
+ *  - task_started/task_progress/task_notification → sub-task progress line
+ *    (task_notification has `summary`, started/progress have `description`,
+ *    progress also has optional `summary?`; prefer summary).
+ * Returns null for every other message.
+ */
+export function messageToNotice(
+  message: unknown,
+): { kind: 'rate_limit' | 'task'; text: string; subStatus?: string } | null {
+  const m = message as {
+    type?: string;
+    subtype?: string;
+    status?: string;
+    summary?: string;
+    description?: string;
+    rate_limit_info?: { status?: string };
+  };
+  if (m?.type === 'rate_limit_event') {
+    if (m.rate_limit_info?.status === 'rejected') {
+      return { kind: 'rate_limit', text: '账号限流中，等待重试…' };
+    }
+    return null;
+  }
+  if (m?.type === 'system') {
+    const sub = m.subtype;
+    if (
+      sub === 'task_started' ||
+      sub === 'task_progress' ||
+      sub === 'task_notification'
+    ) {
+      const status = m.status ?? (sub === 'task_started' ? 'started' : 'progress');
+      const label = m.summary ?? m.description ?? '';
+      // Surface terminal failure/stop so it's visible on the card (spec A2);
+      // fall back to a bare prefix when neither summary nor description is set.
+      const prefix =
+        status === 'failed'
+          ? '子任务失败'
+          : status === 'stopped'
+            ? '子任务已中止'
+            : '子任务';
+      const text = label ? `${prefix}：${label}` : prefix;
+      return { kind: 'task', text, subStatus: status };
+    }
+  }
+  return null;
+}
+
+/**
  * Check for _close sentinel.
  */
 function shouldClose(): boolean {
@@ -815,6 +866,9 @@ async function runQuery(
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
+      // Enable ~30s progress summaries on sub-tasks so long Task runs surface
+      // meaningful `task_progress.summary` (default false); feeds the notice card.
+      agentProgressSummaries: true,
       mcpServers: {
         nanoclaw: {
           command: 'node',
@@ -848,6 +902,13 @@ async function runQuery(
     if (contextTokens !== null) {
       lastContextTokens = contextTokens;
       idleCompact.onContextTokens(contextTokens);
+    }
+
+    // Surface rate-limit backoff / sub-task progress so the card doesn't sit
+    // frozen at "思考中" (rate_limit_event with allowed status is ignored).
+    const notice = messageToNotice(message);
+    if (notice) {
+      emitEvent('notice', notice);
     }
 
     if (message.type === 'system' && message.subtype === 'init') {

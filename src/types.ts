@@ -116,12 +116,13 @@ export type AgentEvent = {
   runId: string; // uuid generated at start of each run
   seq: number; // monotonic per runId
   timestamp: number; // Date.now()
-  kind: 'start' | 'tool_use' | 'tool_result' | 'assistant_text' | 'final';
+  kind: 'start' | 'tool_use' | 'tool_result' | 'assistant_text' | 'final' | 'notice';
   // kind=start: {prompt: string}
   // kind=tool_use: {tool: string, args: any, toolUseId: string}
   // kind=tool_result: {toolUseId: string, status: 'done'|'error', textPreview?: string}
   // kind=assistant_text: {text: string}
   // kind=final: {text: string, elapsedMs: number}
+  // kind=notice: {kind: 'rate_limit'|'task', text: string, subStatus?: string}
   payload: Record<string, any>;
 };
 
