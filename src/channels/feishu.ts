@@ -506,6 +506,127 @@ export function formatQuotedParent(
   return `\n\n[${label}${inner}]`;
 }
 
+export const MAX_FORWARD_IMAGES = 10;
+export const MAX_FORWARD_MESSAGES = 200;
+export const MAX_FORWARD_CHARS = 8000;
+
+export type ForwardItem = {
+  message_id?: string;
+  msg_type?: string;
+  create_time?: string;
+  sender?: { id?: string };
+  body?: { content?: string };
+  mentions?: FeishuMention[];
+};
+
+export type ForwardPlan = {
+  lines: Array<{ senderOpenId: string; text: string }>;
+  imageRequests: Array<{ messageId: string; imageKey: string }>;
+  truncated: { messages: boolean; imagesDropped: number };
+  unreadableCards: number;
+};
+
+// Pure: decide which forwarded children to render, which images to fetch, and
+// apply size caps. No I/O — name resolution & image download happen in the
+// class method expandMergeForward().
+//
+// Feishu limitation (verified 2026-07-02): `interactive` cards are rendered
+// client-side; the message API returns only a "请升级客户端" placeholder with no
+// real content. We render those as `[卡片消息]`, count them (unreadableCards),
+// and never surface the placeholder text or the card's icon image.
+export function planForwardExpansion(
+  items: ForwardItem[],
+  botOpenId: string | null,
+  limits?: { maxMessages?: number; maxChars?: number; maxImages?: number },
+): ForwardPlan {
+  const maxMessages = limits?.maxMessages ?? MAX_FORWARD_MESSAGES;
+  const maxChars = limits?.maxChars ?? MAX_FORWARD_CHARS;
+  const maxImages = limits?.maxImages ?? MAX_FORWARD_IMAGES;
+
+  // Drop all merge_forward containers (outer + any nested) → leaf messages only.
+  const children = (items ?? [])
+    .filter((it) => it && it.msg_type !== 'merge_forward')
+    .sort((a, b) => Number(a.create_time ?? 0) - Number(b.create_time ?? 0));
+
+  const lines: ForwardPlan['lines'] = [];
+  const imageRequests: ForwardPlan['imageRequests'] = [];
+  let imagesDropped = 0;
+  let unreadableCards = 0;
+  let chars = 0;
+  let messagesTruncated = false;
+
+  const collectImage = (messageId: string | undefined, key: string) => {
+    if (imageRequests.length < maxImages && messageId) {
+      imageRequests.push({ messageId, imageKey: key });
+    } else {
+      imagesDropped++;
+    }
+  };
+
+  for (const child of children) {
+    if (lines.length >= maxMessages) {
+      messagesTruncated = true;
+      break;
+    }
+    const senderOpenId = child.sender?.id ?? '';
+    const msgType = child.msg_type ?? '';
+    const content = child.body?.content ?? '';
+    let text: string;
+    // Side effects (image collection, card counting) are deferred until AFTER
+    // the char-cap decision, so a message dropped at the boundary never leaves
+    // a dangling attachment or an inflated unreadable-card count.
+    const pendingImages: string[] = [];
+    let isCard = false;
+
+    if (msgType === 'text' || msgType === 'post') {
+      const parsed = parseInbound(
+        { message_type: msgType, content, mentions: child.mentions ?? [] },
+        botOpenId,
+      );
+      text = parsed?.text || `[${msgType}]`;
+      for (const key of parsed?.imageKeys ?? []) pendingImages.push(key);
+    } else if (msgType === 'image') {
+      text = '[图片]';
+      try {
+        const key = JSON.parse(content)?.image_key;
+        if (key) pendingImages.push(key);
+      } catch {
+        /* keep placeholder */
+      }
+    } else if (msgType === 'interactive') {
+      // Card content is unreadable via API — render a marker, skip its image.
+      text = '[卡片消息]';
+      isCard = true;
+    } else if (msgType === 'file') {
+      let name = 'unknown';
+      try {
+        name = JSON.parse(content)?.file_name ?? 'unknown';
+      } catch {
+        /* keep default */
+      }
+      text = `[文件: ${name}]`;
+    } else {
+      text = `[${msgType}]`;
+    }
+
+    if (chars + text.length > maxChars && lines.length > 0) {
+      messagesTruncated = true;
+      break;
+    }
+    chars += text.length;
+    lines.push({ senderOpenId, text });
+    if (isCard) unreadableCards++;
+    for (const key of pendingImages) collectImage(child.message_id, key);
+  }
+
+  return {
+    lines,
+    imageRequests,
+    truncated: { messages: messagesTruncated, imagesDropped },
+    unreadableCards,
+  };
+}
+
 function buildFailureMessage(
   failures: Array<{ key: string; reason: FailReason }>,
   totalImageCount: number,
@@ -601,6 +722,94 @@ export class FeishuChannel implements Channel {
     return openId;
   }
 
+  private async fetchMergeForwardItems(
+    messageId: string,
+  ): Promise<ForwardItem[]> {
+    const res: any = await this.client.request({
+      method: 'GET',
+      url: `/open-apis/im/v1/messages/${messageId}`,
+    });
+    return res?.data?.items ?? [];
+  }
+
+  // Expand a merge_forward message's items[] into a readable transcript + inline
+  // images (both capped). Shared by the reply-path and the direct-forward path.
+  private async expandMergeForward(items: ForwardItem[]): Promise<{
+    transcript: string;
+    imageAttachments: ImageAttachment[];
+    truncated: { messages: boolean; imagesDropped: number };
+    unreadableCards: number;
+    lineCount: number;
+  }> {
+    const plan = planForwardExpansion(items, this.botOpenId, {
+      maxMessages: MAX_FORWARD_MESSAGES,
+      maxChars: MAX_FORWARD_CHARS,
+      maxImages: MAX_FORWARD_IMAGES,
+    });
+
+    // Resolve unique sender names (cached in nameCache, dedup by open_id).
+    // Bound concurrency: a large digest can have many distinct senders on a
+    // cold cache, and this codebase is 429-sensitive.
+    const nameMap = new Map<string, string>();
+    const uniqueIds = [
+      ...new Set(plan.lines.map((l) => l.senderOpenId).filter(Boolean)),
+    ];
+    const NAME_CONCURRENCY = 8;
+    for (let i = 0; i < uniqueIds.length; i += NAME_CONCURRENCY) {
+      await Promise.all(
+        uniqueIds.slice(i, i + NAME_CONCURRENCY).map(async (id) => {
+          nameMap.set(id, await this.resolveSenderName(id).catch(() => id));
+        }),
+      );
+    }
+
+    // Download images: each key must be fetched with its own child message_id.
+    const keyToMsg = new Map(
+      plan.imageRequests.map((r) => [r.imageKey, r.messageId]),
+    );
+    const keys = plan.imageRequests.map((r) => r.imageKey);
+    const imageAttachments: ImageAttachment[] = keys.length
+      ? (
+          await processImageKeys(
+            keys,
+            (k) => this.downloadImage(keyToMsg.get(k) ?? '', k),
+            logger,
+          )
+        ).attachments
+      : [];
+
+    const bodyLines = plan.lines.map((l) => {
+      const name = l.senderOpenId
+        ? nameMap.get(l.senderOpenId) ?? l.senderOpenId
+        : '';
+      return name ? `${name}: ${l.text}` : l.text;
+    });
+
+    const notes: string[] = [];
+    if (plan.truncated.messages) notes.push('记录较长，仅展开前部分消息');
+    if (plan.truncated.imagesDropped > 0)
+      notes.push(`含较多图片，仅处理前 ${MAX_FORWARD_IMAGES} 张`);
+    if (plan.unreadableCards > 0)
+      notes.push(
+        `含 ${plan.unreadableCards} 条卡片消息，飞书 API 无法读取其内容`,
+      );
+
+    const header = `[合并转发的聊天记录 · 共 ${plan.lines.length} 条]`;
+    const transcript = [
+      header,
+      ...bodyLines,
+      ...(notes.length ? [`[系统: ${notes.join('；')}]`] : []),
+    ].join('\n');
+
+    return {
+      transcript,
+      imageAttachments,
+      truncated: plan.truncated,
+      unreadableCards: plan.unreadableCards,
+      lineCount: plan.lines.length,
+    };
+  }
+
   // Exposed for tests; also called from WS event handler.
   async handleEvent(payload: any): Promise<void> {
     const ev = payload?.event;
@@ -625,8 +834,41 @@ export class FeishuChannel implements Channel {
       return;
     }
 
-    // 3) Parse
-    const parsed = parseInbound(m, this.botOpenId);
+    // 3) Parse — a merge_forward sent directly to a p2p chat expands into a
+    //    transcript instead of being dropped. In groups a bare forward can't
+    //    @-mention the bot, so we leave it to parseInbound (→ drop) and let the
+    //    reply-path in step 7 handle "reply to a forward + @bot".
+    let parsed: ParsedInbound | null;
+    let forwardAttachments: ImageAttachment[] | undefined;
+    const FORWARD_UNREAD_FALLBACK =
+      '[合并转发消息 — 暂时读不到内容，可把文字或截图发我]';
+    if (m.message_type === 'merge_forward' && m.chat_type === 'p2p') {
+      try {
+        const items = await this.fetchMergeForwardItems(m.message_id);
+        const expanded = await this.expandMergeForward(items);
+        parsed = {
+          text:
+            expanded.lineCount === 0
+              ? FORWARD_UNREAD_FALLBACK
+              : expanded.transcript,
+          imageKeys: [],
+          botMentioned: false,
+        };
+        forwardAttachments = expanded.imageAttachments;
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message, msg_id: m.message_id },
+          '[feishu] merge_forward expand failed',
+        );
+        parsed = {
+          text: FORWARD_UNREAD_FALLBACK,
+          imageKeys: [],
+          botMentioned: false,
+        };
+      }
+    } else {
+      parsed = parseInbound(m, this.botOpenId);
+    }
     if (!parsed) {
       logger.debug(
         { message_type: m.message_type },
@@ -669,9 +911,11 @@ export class FeishuChannel implements Channel {
       }
     }
 
-    // 6) Process images if present
-    let attachments: ImageAttachment[] = [];
-    if (parsed.imageKeys.length > 0) {
+    // 6) Process images if present (merge_forward images already downloaded)
+    let attachments: ImageAttachment[] = forwardAttachments ?? [];
+    if (forwardAttachments) {
+      this.reactAck(m.message_id); // ack the forwarded chat record
+    } else if (parsed.imageKeys.length > 0) {
       this.reactAck(m.message_id); // 👀 immediately
       const result = await processImageKeys(
         parsed.imageKeys,
@@ -731,8 +975,24 @@ export class FeishuChannel implements Channel {
           method: 'GET',
           url: `/open-apis/im/v1/messages/${m.parent_id}`,
         });
-        const parentMsg = parentRes?.data?.items?.[0];
-        if (parentMsg) {
+        const items = parentRes?.data?.items ?? [];
+        // Container ordering in items[] isn't guaranteed, so identify the
+        // container by matching the fetched parent_id rather than items[0].
+        const container =
+          items.find((it: ForwardItem) => it.message_id === m.parent_id) ??
+          items[0];
+        if (container?.msg_type === 'merge_forward') {
+          // Replied-to a merged-forward chat record: expand its children.
+          const expanded = await this.expandMergeForward(items);
+          cleanedText += `\n\n[引用的合并转发记录]\n${expanded.transcript}`;
+          attachments = attachments.concat(expanded.imageAttachments);
+          replyToInfo = {
+            messageId: m.parent_id,
+            content: expanded.transcript.slice(0, 500),
+            senderName: '',
+          };
+        } else if (container) {
+          const parentMsg = container;
           // File path (preserved): pull file_key from a replied-to file message.
           if (
             !fileKey &&
@@ -747,9 +1007,9 @@ export class FeishuChannel implements Channel {
             }
           }
 
-          // Non-file parents: surface quoted content (text / post / wiki card /
-          // share_chat / etc.) so the agent sees what the user is referring to.
           if (parentMsg.msg_type !== 'file') {
+            // Non-file parents: surface quoted content (text / post / wiki card
+            // / share_chat / etc.) so the agent sees what the user refers to.
             const parentSenderId = parentMsg.sender?.id ?? '';
             const parentSenderName = parentSenderId
               ? await this.resolveSenderName(parentSenderId).catch(

@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { getChannelFactory } from './registry.js';
-import { parseInbound, formatQuotedParent } from './feishu.js';
+import {
+  parseInbound,
+  formatQuotedParent,
+  planForwardExpansion,
+} from './feishu.js';
 import {
   _initTestDatabase,
   _closeDatabase,
@@ -94,6 +98,482 @@ describe('FeishuChannel factory', () => {
     process.env.FEISHU_APP_ID = 'cli_xxx';
     const factory = getChannelFactory('feishu')!;
     expect(factory(makeOpts())).toBeNull();
+  });
+});
+
+describe('planForwardExpansion', () => {
+  const txt = (id: string, ct: string, sender: string, text: string) => ({
+    message_id: id,
+    msg_type: 'text',
+    create_time: ct,
+    sender: { id: sender },
+    body: { content: JSON.stringify({ text }) },
+  });
+
+  it('drops the merge_forward container, keeps children sorted by create_time', () => {
+    const plan = planForwardExpansion(
+      [
+        {
+          message_id: 'mf',
+          msg_type: 'merge_forward',
+          create_time: '1',
+          body: { content: '{"content":"Merged and Forwarded Message"}' },
+        },
+        txt('c2', '3', 'ou_b', '第二条'),
+        txt('c1', '2', 'ou_a', '第一条'),
+      ],
+      null,
+    );
+    expect(plan.lines).toEqual([
+      { senderOpenId: 'ou_a', text: '第一条' },
+      { senderOpenId: 'ou_b', text: '第二条' },
+    ]);
+    expect(plan.truncated).toEqual({ messages: false, imagesDropped: 0 });
+    expect(plan.unreadableCards).toBe(0);
+  });
+
+  it('collects image requests with child message_id and marks [图片]', () => {
+    const plan = planForwardExpansion(
+      [
+        { message_id: 'mf', msg_type: 'merge_forward', create_time: '1' },
+        {
+          message_id: 'ci',
+          msg_type: 'image',
+          create_time: '2',
+          sender: { id: 'ou_a' },
+          body: { content: JSON.stringify({ image_key: 'img_1' }) },
+        },
+      ],
+      null,
+    );
+    expect(plan.lines[0]).toEqual({ senderOpenId: 'ou_a', text: '[图片]' });
+    expect(plan.imageRequests).toEqual([
+      { messageId: 'ci', imageKey: 'img_1' },
+    ]);
+  });
+
+  it('renders interactive cards as [卡片消息], counts them, downloads no card image', () => {
+    const plan = planForwardExpansion(
+      [
+        { message_id: 'mf', msg_type: 'merge_forward', create_time: '1' },
+        {
+          message_id: 'cc',
+          msg_type: 'interactive',
+          create_time: '2',
+          sender: { id: 'ou_a' },
+          body: {
+            content: JSON.stringify({
+              title: null,
+              elements: [
+                [
+                  { tag: 'img', image_key: 'img_upgrade' },
+                  { tag: 'text', text: '请升级至最新版本客户端，以查看内容' },
+                ],
+              ],
+            }),
+          },
+        },
+      ],
+      null,
+    );
+    expect(plan.lines[0]).toEqual({ senderOpenId: 'ou_a', text: '[卡片消息]' });
+    expect(plan.unreadableCards).toBe(1);
+    expect(plan.imageRequests).toEqual([]);
+  });
+
+  it('renders file and unknown types as placeholders', () => {
+    const plan = planForwardExpansion(
+      [
+        {
+          message_id: 'cf',
+          msg_type: 'file',
+          create_time: '2',
+          sender: { id: 'ou_a' },
+          body: { content: JSON.stringify({ file_name: 'spec.pdf' }) },
+        },
+        {
+          message_id: 'cs',
+          msg_type: 'share_chat',
+          create_time: '3',
+          sender: { id: 'ou_b' },
+          body: { content: '{}' },
+        },
+      ],
+      null,
+    );
+    expect(plan.lines[0].text).toBe('[文件: spec.pdf]');
+    expect(plan.lines[1].text).toBe('[share_chat]');
+  });
+
+  it('caps image downloads at maxImages and reports imagesDropped', () => {
+    const items: any[] = [
+      { message_id: 'mf', msg_type: 'merge_forward', create_time: '0' },
+    ];
+    for (let i = 0; i < 5; i++)
+      items.push({
+        message_id: `ci${i}`,
+        msg_type: 'image',
+        create_time: String(i + 1),
+        sender: { id: 'ou_a' },
+        body: { content: JSON.stringify({ image_key: `k${i}` }) },
+      });
+    const plan = planForwardExpansion(items, null, { maxImages: 2 });
+    expect(plan.imageRequests).toHaveLength(2);
+    expect(plan.truncated.imagesDropped).toBe(3);
+  });
+
+  it('caps message count at maxMessages and marks truncated', () => {
+    const items: any[] = [
+      { message_id: 'mf', msg_type: 'merge_forward', create_time: '0' },
+    ];
+    for (let i = 0; i < 5; i++)
+      items.push(txt(`c${i}`, String(i + 1), 'ou_a', `m${i}`));
+    const plan = planForwardExpansion(items, null, { maxMessages: 3 });
+    expect(plan.lines).toHaveLength(3);
+    expect(plan.truncated.messages).toBe(true);
+  });
+
+  it('char cap: message dropped at the boundary does not leak its image', () => {
+    const items: any[] = [
+      { message_id: 'mf', msg_type: 'merge_forward', create_time: '0' },
+      {
+        message_id: 'c1',
+        msg_type: 'text',
+        create_time: '1',
+        sender: { id: 'ou_a' },
+        body: { content: JSON.stringify({ text: 'abcde' }) },
+      },
+      {
+        message_id: 'c2',
+        msg_type: 'image',
+        create_time: '2',
+        sender: { id: 'ou_a' },
+        body: { content: JSON.stringify({ image_key: 'imgX' }) },
+      },
+    ];
+    const plan = planForwardExpansion(items, null, { maxChars: 5 });
+    expect(plan.lines).toHaveLength(1);
+    expect(plan.truncated.messages).toBe(true);
+    // the dropped image message must NOT have leaked an image request
+    expect(plan.imageRequests).toEqual([]);
+  });
+
+  it('returns empty for container-only / empty items', () => {
+    expect(planForwardExpansion([], null).lines).toEqual([]);
+    expect(
+      planForwardExpansion(
+        [{ message_id: 'mf', msg_type: 'merge_forward', create_time: '1' }],
+        null,
+      ).lines,
+    ).toEqual([]);
+  });
+});
+
+describe('expandMergeForward', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  it('assembles transcript with resolved names, images, card marker and hint', async () => {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) =>
+      (({ ou_a: '建波', ou_b: 'Nine-dev' } as Record<string, string>)[id] ??
+        id));
+    ch.downloadImage = vi.fn(async () =>
+      readFileSync(
+        '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
+      ),
+    );
+
+    const items = [
+      {
+        message_id: 'mf',
+        msg_type: 'merge_forward',
+        create_time: '1',
+        body: { content: '{"content":"Merged and Forwarded Message"}' },
+      },
+      {
+        message_id: 'c1',
+        msg_type: 'text',
+        create_time: '2',
+        sender: { id: 'ou_a' },
+        body: { content: JSON.stringify({ text: '生成一个prd' }) },
+      },
+      {
+        message_id: 'c2',
+        msg_type: 'image',
+        create_time: '3',
+        sender: { id: 'ou_b' },
+        body: { content: JSON.stringify({ image_key: 'img_1' }) },
+      },
+      {
+        message_id: 'c3',
+        msg_type: 'interactive',
+        create_time: '4',
+        sender: { id: 'ou_b' },
+        body: { content: JSON.stringify({ elements: [] }) },
+      },
+    ];
+    const out = await ch.expandMergeForward(items);
+    expect(out.transcript).toContain('[合并转发的聊天记录 · 共 3 条]');
+    expect(out.transcript).toContain('建波: 生成一个prd');
+    expect(out.transcript).toContain('Nine-dev: [图片]');
+    expect(out.transcript).toContain('Nine-dev: [卡片消息]');
+    expect(out.transcript).toContain('飞书 API 无法读取其内容');
+    expect(out.imageAttachments).toHaveLength(1);
+    expect(out.imageAttachments[0].sourceKey).toBe('img_1');
+    // image downloaded with the CHILD message_id, not the container's
+    expect(ch.downloadImage).toHaveBeenCalledWith('c2', 'img_1');
+  });
+
+  it('fetchMergeForwardItems returns data.items from GET', async () => {
+    const ch = getChannelFactory('feishu')!(makeOpts())! as any;
+    ch.client = {
+      request: vi.fn(async () => ({ data: { items: [{ message_id: 'x' }] } })),
+    };
+    const items = await ch.fetchMergeForwardItems('om_mf');
+    expect(items).toEqual([{ message_id: 'x' }]);
+    expect(ch.client.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        url: '/open-apis/im/v1/messages/om_mf',
+      }),
+    );
+  });
+});
+
+describe('FeishuChannel merge_forward wiring', () => {
+  beforeEach(() => {
+    process.env.FEISHU_APP_ID = 'cli_test';
+    process.env.FEISHU_APP_SECRET = 'secret_test';
+  });
+  afterEach(() => restoreEnv(origEnv));
+
+  const mfItems = () => ({
+    data: {
+      items: [
+        {
+          message_id: 'mf',
+          msg_type: 'merge_forward',
+          create_time: '1',
+          body: { content: '{"content":"Merged and Forwarded Message"}' },
+        },
+        {
+          message_id: 'c1',
+          msg_type: 'text',
+          create_time: '2',
+          sender: { id: 'ou_a' },
+          body: { content: JSON.stringify({ text: '会话内容一' }) },
+        },
+        {
+          message_id: 'c2',
+          msg_type: 'image',
+          create_time: '3',
+          sender: { id: 'ou_a' },
+          body: { content: JSON.stringify({ image_key: 'img_1' }) },
+        },
+      ],
+    },
+  });
+
+  it('group reply to merge_forward + @bot → transcript appended, image attached', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) =>
+      (({ ou_a: '建波' } as Record<string, string>)[id] ?? id));
+    ch.downloadImage = vi.fn(async () =>
+      readFileSync(
+        '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
+      ),
+    );
+    ch.client = {
+      request: vi.fn(async () => mfItems()),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        chat_type: 'group',
+        chat_id: 'oc_g1',
+        msg_type: 'text',
+        content: JSON.stringify({ text: '@_user_1 你能读到这段记录吗' }),
+        parent_id: 'mf',
+        mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }],
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('建波: 会话内容一');
+    expect(msg.content).toContain('建波: [图片]');
+    expect(msg.images).toHaveLength(1);
+    expect(msg.reply_to_message_content).toContain('会话内容一');
+  });
+
+  it('reply to merge_forward whose file child is items[0] → expands, no spurious file download', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) => id);
+    ch.downloadFile = vi.fn(async () => Buffer.from('should-not-be-called'));
+    ch.client = {
+      request: vi.fn(async () => ({
+        data: {
+          items: [
+            // file child at items[0] — container is NOT first
+            {
+              message_id: 'cf',
+              msg_type: 'file',
+              create_time: '2',
+              sender: { id: 'ou_a' },
+              body: {
+                content: JSON.stringify({ file_key: 'fk', file_name: 'a.md' }),
+              },
+            },
+            {
+              message_id: 'mf',
+              msg_type: 'merge_forward',
+              create_time: '1',
+              body: { content: '{"content":"Merged and Forwarded Message"}' },
+            },
+            {
+              message_id: 'c1',
+              msg_type: 'text',
+              create_time: '3',
+              sender: { id: 'ou_a' },
+              body: { content: JSON.stringify({ text: '内容X' }) },
+            },
+          ],
+        },
+      })),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        chat_type: 'group',
+        chat_id: 'oc_g3',
+        msg_type: 'text',
+        content: JSON.stringify({ text: '@_user_1 读下这段' }),
+        parent_id: 'mf',
+        mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }],
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][1].content).toContain('内容X');
+    // the forwarded file child must NOT be mistaken for a replied-to file
+    expect(ch.downloadFile).not.toHaveBeenCalled();
+  });
+
+  it('p2p direct merge_forward → not dropped, expanded transcript delivered', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) =>
+      (({ ou_a: '建波', ou_b: 'Nine-dev' } as Record<string, string>)[id] ??
+        id));
+    ch.downloadImage = vi.fn(async () =>
+      readFileSync(
+        '/Users/admin/Desktop/vibe-coding/nanoclaw/tests/fixtures/image-normal.png',
+      ),
+    );
+    ch.client = {
+      request: vi.fn(async () => ({
+        data: {
+          items: [
+            {
+              message_id: 'mf',
+              msg_type: 'merge_forward',
+              create_time: '1',
+              body: { content: '{"content":"Merged and Forwarded Message"}' },
+            },
+            {
+              message_id: 'c1',
+              msg_type: 'text',
+              create_time: '2',
+              sender: { id: 'ou_a' },
+              body: { content: JSON.stringify({ text: '生成一个prd' }) },
+            },
+            {
+              message_id: 'c2',
+              msg_type: 'text',
+              create_time: '3',
+              sender: { id: 'ou_b' },
+              body: { content: JSON.stringify({ text: 'MRD 已完整读取' }) },
+            },
+          ],
+        },
+      })),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'merge_forward',
+        message_id: 'mf',
+        content: '{"content":"Merged and Forwarded Message"}',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const msg = onMessage.mock.calls[0][1];
+    expect(msg.content).toContain('建波: 生成一个prd');
+    expect(msg.content).toContain('Nine-dev: MRD 已完整读取');
+    expect(ch.client.request).toHaveBeenCalledWith(
+      expect.objectContaining({ url: '/open-apis/im/v1/messages/mf' }),
+    );
+  });
+
+  it('p2p merge_forward whose GET fails → delivers a fallback, not silent drop', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.resolveSenderName = vi.fn(async (id: string) => id);
+    ch.client = {
+      request: vi.fn(async () => {
+        throw Object.assign(new Error('rate limited'), { statusCode: 429 });
+      }),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        msg_type: 'merge_forward',
+        message_id: 'mf',
+        content: '{"content":"Merged and Forwarded Message"}',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][1].content).toContain('读不到内容');
+  });
+
+  it('group bare merge_forward (no @bot) → dropped without any GET', async () => {
+    const onMessage = vi.fn();
+    const ch = getChannelFactory('feishu')!(makeOpts({ onMessage }))! as any;
+    ch.botOpenId = 'ou_bot';
+    ch.client = {
+      request: vi.fn(async () => mfItems()),
+      im: { messageReaction: { create: vi.fn().mockResolvedValue({}) } },
+    };
+
+    await ch.handleEvent(
+      makeEvent({
+        chat_type: 'group',
+        chat_id: 'oc_g2',
+        msg_type: 'merge_forward',
+        message_id: 'mf',
+        content: '{"content":"Merged and Forwarded Message"}',
+      }),
+    );
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(ch.client.request).not.toHaveBeenCalled();
   });
 });
 
