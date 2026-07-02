@@ -506,6 +506,120 @@ export function formatQuotedParent(
   return `\n\n[${label}${inner}]`;
 }
 
+export const MAX_FORWARD_IMAGES = 10;
+export const MAX_FORWARD_MESSAGES = 200;
+export const MAX_FORWARD_CHARS = 8000;
+
+export type ForwardItem = {
+  message_id?: string;
+  msg_type?: string;
+  create_time?: string;
+  sender?: { id?: string };
+  body?: { content?: string };
+  mentions?: FeishuMention[];
+};
+
+export type ForwardPlan = {
+  lines: Array<{ senderOpenId: string; text: string }>;
+  imageRequests: Array<{ messageId: string; imageKey: string }>;
+  truncated: { messages: boolean; imagesDropped: number };
+  unreadableCards: number;
+};
+
+// Pure: decide which forwarded children to render, which images to fetch, and
+// apply size caps. No I/O — name resolution & image download happen in the
+// class method expandMergeForward().
+//
+// Feishu limitation (verified 2026-07-02): `interactive` cards are rendered
+// client-side; the message API returns only a "请升级客户端" placeholder with no
+// real content. We render those as `[卡片消息]`, count them (unreadableCards),
+// and never surface the placeholder text or the card's icon image.
+export function planForwardExpansion(
+  items: ForwardItem[],
+  botOpenId: string | null,
+  limits?: { maxMessages?: number; maxChars?: number; maxImages?: number },
+): ForwardPlan {
+  const maxMessages = limits?.maxMessages ?? MAX_FORWARD_MESSAGES;
+  const maxChars = limits?.maxChars ?? MAX_FORWARD_CHARS;
+  const maxImages = limits?.maxImages ?? MAX_FORWARD_IMAGES;
+
+  // Drop all merge_forward containers (outer + any nested) → leaf messages only.
+  const children = (items ?? [])
+    .filter((it) => it && it.msg_type !== 'merge_forward')
+    .sort((a, b) => Number(a.create_time ?? 0) - Number(b.create_time ?? 0));
+
+  const lines: ForwardPlan['lines'] = [];
+  const imageRequests: ForwardPlan['imageRequests'] = [];
+  let imagesDropped = 0;
+  let unreadableCards = 0;
+  let chars = 0;
+  let messagesTruncated = false;
+
+  const collectImage = (messageId: string | undefined, key: string) => {
+    if (imageRequests.length < maxImages && messageId) {
+      imageRequests.push({ messageId, imageKey: key });
+    } else {
+      imagesDropped++;
+    }
+  };
+
+  for (const child of children) {
+    if (lines.length >= maxMessages) {
+      messagesTruncated = true;
+      break;
+    }
+    const senderOpenId = child.sender?.id ?? '';
+    const msgType = child.msg_type ?? '';
+    const content = child.body?.content ?? '';
+    let text: string;
+
+    if (msgType === 'text' || msgType === 'post') {
+      const parsed = parseInbound(
+        { message_type: msgType, content, mentions: child.mentions ?? [] },
+        botOpenId,
+      );
+      text = parsed?.text || `[${msgType}]`;
+      for (const key of parsed?.imageKeys ?? []) collectImage(child.message_id, key);
+    } else if (msgType === 'image') {
+      text = '[图片]';
+      try {
+        const key = JSON.parse(content)?.image_key;
+        if (key) collectImage(child.message_id, key);
+      } catch {
+        /* keep placeholder */
+      }
+    } else if (msgType === 'interactive') {
+      // Card content is unreadable via API — render a marker, skip its image.
+      text = '[卡片消息]';
+      unreadableCards++;
+    } else if (msgType === 'file') {
+      let name = 'unknown';
+      try {
+        name = JSON.parse(content)?.file_name ?? 'unknown';
+      } catch {
+        /* keep default */
+      }
+      text = `[文件: ${name}]`;
+    } else {
+      text = `[${msgType}]`;
+    }
+
+    if (chars + text.length > maxChars && lines.length > 0) {
+      messagesTruncated = true;
+      break;
+    }
+    chars += text.length;
+    lines.push({ senderOpenId, text });
+  }
+
+  return {
+    lines,
+    imageRequests,
+    truncated: { messages: messagesTruncated, imagesDropped },
+    unreadableCards,
+  };
+}
+
 function buildFailureMessage(
   failures: Array<{ key: string; reason: FailReason }>,
   totalImageCount: number,

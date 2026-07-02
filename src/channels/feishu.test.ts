@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { getChannelFactory } from './registry.js';
-import { parseInbound, formatQuotedParent } from './feishu.js';
+import {
+  parseInbound,
+  formatQuotedParent,
+  planForwardExpansion,
+} from './feishu.js';
 import {
   _initTestDatabase,
   _closeDatabase,
@@ -94,6 +98,149 @@ describe('FeishuChannel factory', () => {
     process.env.FEISHU_APP_ID = 'cli_xxx';
     const factory = getChannelFactory('feishu')!;
     expect(factory(makeOpts())).toBeNull();
+  });
+});
+
+describe('planForwardExpansion', () => {
+  const txt = (id: string, ct: string, sender: string, text: string) => ({
+    message_id: id,
+    msg_type: 'text',
+    create_time: ct,
+    sender: { id: sender },
+    body: { content: JSON.stringify({ text }) },
+  });
+
+  it('drops the merge_forward container, keeps children sorted by create_time', () => {
+    const plan = planForwardExpansion(
+      [
+        {
+          message_id: 'mf',
+          msg_type: 'merge_forward',
+          create_time: '1',
+          body: { content: '{"content":"Merged and Forwarded Message"}' },
+        },
+        txt('c2', '3', 'ou_b', '第二条'),
+        txt('c1', '2', 'ou_a', '第一条'),
+      ],
+      null,
+    );
+    expect(plan.lines).toEqual([
+      { senderOpenId: 'ou_a', text: '第一条' },
+      { senderOpenId: 'ou_b', text: '第二条' },
+    ]);
+    expect(plan.truncated).toEqual({ messages: false, imagesDropped: 0 });
+    expect(plan.unreadableCards).toBe(0);
+  });
+
+  it('collects image requests with child message_id and marks [图片]', () => {
+    const plan = planForwardExpansion(
+      [
+        { message_id: 'mf', msg_type: 'merge_forward', create_time: '1' },
+        {
+          message_id: 'ci',
+          msg_type: 'image',
+          create_time: '2',
+          sender: { id: 'ou_a' },
+          body: { content: JSON.stringify({ image_key: 'img_1' }) },
+        },
+      ],
+      null,
+    );
+    expect(plan.lines[0]).toEqual({ senderOpenId: 'ou_a', text: '[图片]' });
+    expect(plan.imageRequests).toEqual([
+      { messageId: 'ci', imageKey: 'img_1' },
+    ]);
+  });
+
+  it('renders interactive cards as [卡片消息], counts them, downloads no card image', () => {
+    const plan = planForwardExpansion(
+      [
+        { message_id: 'mf', msg_type: 'merge_forward', create_time: '1' },
+        {
+          message_id: 'cc',
+          msg_type: 'interactive',
+          create_time: '2',
+          sender: { id: 'ou_a' },
+          body: {
+            content: JSON.stringify({
+              title: null,
+              elements: [
+                [
+                  { tag: 'img', image_key: 'img_upgrade' },
+                  { tag: 'text', text: '请升级至最新版本客户端，以查看内容' },
+                ],
+              ],
+            }),
+          },
+        },
+      ],
+      null,
+    );
+    expect(plan.lines[0]).toEqual({ senderOpenId: 'ou_a', text: '[卡片消息]' });
+    expect(plan.unreadableCards).toBe(1);
+    expect(plan.imageRequests).toEqual([]);
+  });
+
+  it('renders file and unknown types as placeholders', () => {
+    const plan = planForwardExpansion(
+      [
+        {
+          message_id: 'cf',
+          msg_type: 'file',
+          create_time: '2',
+          sender: { id: 'ou_a' },
+          body: { content: JSON.stringify({ file_name: 'spec.pdf' }) },
+        },
+        {
+          message_id: 'cs',
+          msg_type: 'share_chat',
+          create_time: '3',
+          sender: { id: 'ou_b' },
+          body: { content: '{}' },
+        },
+      ],
+      null,
+    );
+    expect(plan.lines[0].text).toBe('[文件: spec.pdf]');
+    expect(plan.lines[1].text).toBe('[share_chat]');
+  });
+
+  it('caps image downloads at maxImages and reports imagesDropped', () => {
+    const items: any[] = [
+      { message_id: 'mf', msg_type: 'merge_forward', create_time: '0' },
+    ];
+    for (let i = 0; i < 5; i++)
+      items.push({
+        message_id: `ci${i}`,
+        msg_type: 'image',
+        create_time: String(i + 1),
+        sender: { id: 'ou_a' },
+        body: { content: JSON.stringify({ image_key: `k${i}` }) },
+      });
+    const plan = planForwardExpansion(items, null, { maxImages: 2 });
+    expect(plan.imageRequests).toHaveLength(2);
+    expect(plan.truncated.imagesDropped).toBe(3);
+  });
+
+  it('caps message count at maxMessages and marks truncated', () => {
+    const items: any[] = [
+      { message_id: 'mf', msg_type: 'merge_forward', create_time: '0' },
+    ];
+    for (let i = 0; i < 5; i++)
+      items.push(txt(`c${i}`, String(i + 1), 'ou_a', `m${i}`));
+    const plan = planForwardExpansion(items, null, { maxMessages: 3 });
+    expect(plan.lines).toHaveLength(3);
+    expect(plan.truncated.messages).toBe(true);
+  });
+
+  it('returns empty for container-only / empty items', () => {
+    expect(planForwardExpansion([], null).lines).toEqual([]);
+    expect(
+      planForwardExpansion(
+        [{ message_id: 'mf', msg_type: 'merge_forward', create_time: '1' }],
+        null,
+      ).lines,
+    ).toEqual([]);
   });
 });
 
