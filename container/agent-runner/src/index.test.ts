@@ -11,6 +11,7 @@ import {
   waitForIpcMessage,
   IdleCompactController,
   isDotaTrigger,
+  messageToNotice,
 } from './index.js';
 
 describe('isDotaTrigger', () => {
@@ -425,5 +426,89 @@ describe('IdleCompactController', () => {
     c.dispose();
     vi.advanceTimersByTime(60000);
     expect(pushed).toBe(0);
+  });
+});
+
+describe('messageToNotice', () => {
+  it('maps a REJECTED rate_limit_event to a rate_limit notice', () => {
+    const n = messageToNotice({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'rejected' },
+    });
+    expect(n).toEqual({ kind: 'rate_limit', text: '账号限流中，等待重试…' });
+  });
+
+  it('ignores allowed / allowed_warning rate_limit_event (normal operation)', () => {
+    expect(
+      messageToNotice({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } }),
+    ).toBeNull();
+    expect(
+      messageToNotice({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed_warning' },
+      }),
+    ).toBeNull();
+  });
+
+  it('maps task_notification (has summary) to a task notice with status', () => {
+    const n = messageToNotice({
+      type: 'system',
+      subtype: 'task_notification',
+      status: 'completed',
+      summary: 'Adversarially review DOTA plan',
+    });
+    expect(n).toEqual({
+      kind: 'task',
+      text: '子任务：Adversarially review DOTA plan',
+      subStatus: 'completed',
+    });
+  });
+
+  it('maps task_started (has description, no summary) to a task notice', () => {
+    const n = messageToNotice({
+      type: 'system',
+      subtype: 'task_started',
+      description: '跑 DOTA',
+    });
+    expect(n).toEqual({ kind: 'task', text: '子任务：跑 DOTA', subStatus: 'started' });
+  });
+
+  it('maps task_progress using summary when present, else description', () => {
+    expect(
+      messageToNotice({ type: 'system', subtype: 'task_progress', description: '读文件' }),
+    ).toEqual({ kind: 'task', text: '子任务：读文件', subStatus: 'progress' });
+    expect(
+      messageToNotice({
+        type: 'system',
+        subtype: 'task_progress',
+        description: '读文件',
+        summary: '正在审查方案',
+      }),
+    ).toEqual({ kind: 'task', text: '子任务：正在审查方案', subStatus: 'progress' });
+  });
+
+  it('surfaces terminal failed / stopped task status', () => {
+    expect(
+      messageToNotice({
+        type: 'system', subtype: 'task_notification', status: 'failed', summary: '构建挂了',
+      }),
+    ).toEqual({ kind: 'task', text: '子任务失败：构建挂了', subStatus: 'failed' });
+    expect(
+      messageToNotice({
+        type: 'system', subtype: 'task_notification', status: 'stopped', summary: '用户中止',
+      }),
+    ).toEqual({ kind: 'task', text: '子任务已中止：用户中止', subStatus: 'stopped' });
+  });
+
+  it('falls back to a bare prefix when task has neither summary nor description', () => {
+    expect(
+      messageToNotice({ type: 'system', subtype: 'task_progress' }),
+    ).toEqual({ kind: 'task', text: '子任务', subStatus: 'progress' });
+  });
+
+  it('returns null for ordinary messages', () => {
+    expect(messageToNotice({ type: 'assistant' })).toBeNull();
+    expect(messageToNotice({ type: 'result' })).toBeNull();
+    expect(messageToNotice({ type: 'system', subtype: 'init' })).toBeNull();
   });
 });

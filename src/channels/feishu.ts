@@ -77,6 +77,11 @@ interface CardSession {
   // When false, buildCard omits the tool-calls section and tokenFooter.
   // Sourced from RegisteredGroup.containerConfig.cardVerbose at session creation.
   verbose: boolean;
+  // Latest agent notice (rate-limit backoff / sub-task progress). Rendered on
+  // the running status line so the card doesn't look frozen at "思考中".
+  // noticeKind lets tool_use clear a rate_limit notice without wiping task progress.
+  noticeText?: string;
+  noticeKind?: 'rate_limit' | 'task';
 }
 
 function _formatToolEntry(ev: ToolEvent): string {
@@ -190,7 +195,22 @@ function buildCard(session: CardSession): object {
     elapsedMs >= 60000
       ? `${(elapsedMs / 60000).toFixed(1)}min`
       : `${(elapsedMs / 1000).toFixed(1)}s`;
-  const subtitle = isFinal ? `已完成 (${elapsed})` : `运行中… (${elapsed})`;
+  // While running, surface an action in the subtitle so neither concise nor
+  // verbose cards look frozen at "运行中…" (subtitle is common to both modes →
+  // no verbose gap). Priority: notice (rate-limit/sub-task) > current tool name
+  // (covers a long single tool call in concise mode, which hides the tool list).
+  // Only the latest still-running tool (not a finished one) — once it completes
+  // we fall back to "运行中…" (waiting for the model) rather than a stale ⏳ tool.
+  const runningTool = !isFinal
+    ? [...session.toolEvents].reverse().find((e) => e.status === 'running')?.tool
+    : undefined;
+  const subtitle = isFinal
+    ? `已完成 (${elapsed})`
+    : session.noticeText
+      ? `⏳ ${session.noticeText} (${elapsed})`
+      : runningTool
+        ? `⏳ ${runningTool} (${elapsed})`
+        : `运行中… (${elapsed})`;
   const template = isFinal ? 'green' : 'blue';
   const promptPreview = extractUserMessage(session.prompt);
 
@@ -1093,6 +1113,18 @@ export class FeishuChannel implements Channel {
     }
   }
 
+  /**
+   * Clear a rate-limit notice when real progress resumes. Keyed on noticeKind
+   * (not the literal text, which lives in another package) so task-progress
+   * notices are preserved — only the "被限流" backoff line is cleared.
+   */
+  private clearRateLimitNotice(session: CardSession): void {
+    if (session.noticeKind === 'rate_limit') {
+      session.noticeText = undefined;
+      session.noticeKind = undefined;
+    }
+  }
+
   async onAgentEvent(jid: string, event: AgentEvent): Promise<void> {
     if (!this.ownsJid(jid)) return;
     const chatId = jid.slice(JID_PREFIX.length);
@@ -1149,6 +1181,9 @@ export class FeishuChannel implements Channel {
     if (!session || session.runId !== event.runId) return;
 
     if (event.kind === 'tool_use') {
+      // Real progress arrived → a rate-limit backoff has cleared. (Task
+      // progress notices are kept; they're superseded by the next notice.)
+      this.clearRateLimitNotice(session);
       session.toolEvents.push({
         tool: String(event.payload.tool ?? ''),
         args: (event.payload.args as Record<string, any>) ?? {},
@@ -1162,6 +1197,7 @@ export class FeishuChannel implements Channel {
         await this.schedulePatch(jid);
       }
     } else if (event.kind === 'tool_result') {
+      this.clearRateLimitNotice(session);
       const toolUseId = String(event.payload.toolUseId ?? '');
       const status =
         event.payload.status === 'error' ? 'error' : ('done' as const);
@@ -1174,14 +1210,33 @@ export class FeishuChannel implements Channel {
         entry.resultPreview = preview;
       }
       if (session.messageId) await this.schedulePatch(jid);
+    } else if (event.kind === 'notice') {
+      // rate-limit backoff / sub-task progress. Surface it so the card doesn't
+      // sit frozen at "运行中…". Rendered into the subtitle by buildCard.
+      session.noticeText = String(event.payload.text ?? '') || undefined;
+      session.noticeKind = event.payload.kind as 'rate_limit' | 'task' | undefined;
+      // A rate-limit can hit before any tool_use (card is lazy-created), so
+      // create the card now to make the backoff visible; otherwise patch.
+      if (!session.messageId) {
+        await this.createCard(jid, chatId, session);
+      } else {
+        await this.schedulePatch(jid);
+      }
     } else if (event.kind === 'final') {
       const text = stripInternalTags(String(event.payload.text ?? ''));
       const usage = event.payload.usage as TokenUsage | undefined;
 
       if (!session.messageId) {
-        // Zero-tool run — don't send here; the existing stdout callback in
-        // index.ts already sends the final text as a plain message.
-        // Sending here too would cause duplicate messages.
+        // Zero-tool run with NO card — the stdout callback in index.ts sends the
+        // final text as a plain message (not suppressed, since no card exists).
+        // Rendering here too would duplicate, so defer to stdout.
+        //
+        // NOTE: when a notice (rate-limit/sub-task) lazily created a card,
+        // messageId is set and we intentionally fall through: the final answer
+        // is patched INTO that card below, and the plain stdout copy is
+        // suppressed (suppressForCard checks messageId, feishu.ts sendMessage /
+        // index.ts:370). Deleting the card here instead would race the stdout
+        // suppression and drop the answer entirely.
         if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
         this.cardSessions.delete(jid);
         logger.info(
