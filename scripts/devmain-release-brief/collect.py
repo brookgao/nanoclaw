@@ -49,6 +49,23 @@ def compute_days_stale(updated_at_iso, now):
     return (now - upd).days
 
 
+def parse_numstat(text):
+    # git diff --numstat:每行 "added\tdeleted\tpath";二进制文件为 "-\t-\tpath"。
+    # locale 无关(不像 --shortstat 依赖英文 "insertion/deletion")。
+    ins = dele = files = 0
+    for ln in text.splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 3:
+            continue
+        files += 1
+        a, d = parts[0], parts[1]
+        if a.isdigit():
+            ins += int(a)
+        if d.isdigit():
+            dele += int(d)
+    return ins, dele, files
+
+
 # --- git 副作用层(全 fail-fast)---
 
 def sh(args, cwd):
@@ -87,11 +104,9 @@ def pending_prs(cwd):
     for line in filter(None, out.splitlines()):
         h, an, ci, s = line.split("\x01")
         pr, branch = parse_pr_subject(s)
-        stat = sh(["git", "diff", "--shortstat", h + "^1", h], cwd)
-        ins = int((re.search(r"(\d+) insertion", stat) or [0, 0])[1]) if "insertion" in stat else 0
-        dele = int((re.search(r"(\d+) deletion", stat) or [0, 0])[1]) if "deletion" in stat else 0
-        fch = int((re.search(r"(\d+) file", stat) or [0, 0])[1]) if "file" in stat else 0
-        prs.append({"pr": pr, "branch": branch, "author": an, "date": ci, "subject": s,
+        ins, dele, fch = parse_numstat(sh(["git", "diff", "--numstat", h + "^1", h], cwd))
+        # merged_by = merge commit 的 %an(点合并的人),不是 PR 作者;真作者看 branch / gh。
+        prs.append({"pr": pr, "branch": branch, "merged_by": an, "date": ci, "subject": s,
                     "files_changed": fch, "insertions": ins, "deletions": dele, "merge_hash": h})
     return prs
 
@@ -103,10 +118,10 @@ def reverse_commits(cwd):
     for line in filter(None, out.splitlines()):
         h, an, ci, s = line.split("\x01")
         rec = {"hash": h[:9], "author": an, "date": ci, "subject": s}
-        if re.match(r"Merge pull request #\d+ from \S+?/dev\b", s):
+        if re.match(r"Merge pull request #\d+ from \S+?/dev$", s):
             harmless.append(rec)
         else:
-            rec["files"] = [f for f in sh(["git", "diff", "--name-only", h + "^1", h], cwd).splitlines() if f]
+            rec["files"] = [f for f in sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", h + "^1", h], cwd).splitlines() if f]
             hotfix.append(rec)
     return {"harmless_release_merges": harmless, "real_hotfixes": hotfix}
 
@@ -123,12 +138,12 @@ def open_prs(cwd, now):
 
 
 def risk_scan(cwd, pending):
-    files = sh(["git", "diff", "--name-only", "origin/main..origin/dev"], cwd).splitlines()
+    files = sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", "origin/main..origin/dev"], cwd).splitlines()
     schema = sorted({f for f in files if is_schema_file(f)})
     big = []
     for p in pending:
         if p["insertions"] + p["deletions"] > BIG_PR_LINES:
-            fl = sh(["git", "diff", "--name-only", p["merge_hash"] + "^1", p["merge_hash"]], cwd).splitlines()
+            fl = sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", p["merge_hash"] + "^1", p["merge_hash"]], cwd).splitlines()
             big.append({"pr": p["pr"], "subject": p["subject"], "files_changed": p["files_changed"],
                         "churn": p["insertions"] + p["deletions"],
                         "files": [f for f in fl if f][:25], "merge_hash": p["merge_hash"]})
@@ -171,7 +186,8 @@ def main():
     if a.out == "-":
         print(txt)
     else:
-        open(a.out, "w").write(txt)
+        with open(a.out, "w", encoding="utf-8") as f:
+            f.write(txt)
         print("written: " + a.out, file=sys.stderr)
 
 

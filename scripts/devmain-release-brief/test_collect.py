@@ -38,6 +38,16 @@ def test_compute_days_stale():
     assert collect.compute_days_stale("2026-07-10T00:00:00+00:00", now) == 5
 
 
+def test_parse_numstat_sums_and_skips_binary():
+    # 普通行累加,二进制 "-\t-" 跳过增删但计入文件数
+    text = "12\t3\tsrc/a.py\n0\t5\tsrc/b.py\n-\t-\tassets/logo.png"
+    assert collect.parse_numstat(text) == (12, 8, 3)
+
+
+def test_parse_numstat_empty():
+    assert collect.parse_numstat("") == (0, 0, 0)
+
+
 # --- fail-fast(git / fetch / gh)---
 
 def test_fetch_raises_on_nonzero(monkeypatch):

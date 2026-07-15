@@ -11,7 +11,7 @@
 | `repo` | 仓名 |
 | `dev_head` | `origin/dev` short-sha(新鲜度指纹,fetch 后即取) |
 | `dev_ahead_main` / `main_ahead_dev` | dev 比 main 多/少几个提交 |
-| `pending_merged_prs[]` | 已合进 dev、main 还没有的 PR;含 `pr/branch/author/date/files_changed/insertions/deletions/merge_hash` |
+| `pending_merged_prs[]` | 已合进 dev、main 还没有的 PR;含 `pr/branch/merged_by/date/files_changed/insertions/deletions/merge_hash`。⚠️ `merged_by` 是**点合并的人**(merge commit 作者),**不是 PR 作者**;真责任人看 `branch`(feat/xxx)或 `gh pr view <pr> --json author` |
 | `reverse_commits.real_hotfixes[]` | ⚠️ 只在 main 未回流 dev 的真 hotfix(含 `files`)——发前必须对齐 |
 | `reverse_commits.harmless_release_merges[]` | 过去发布产生的合并提交(无害) |
 | `open_prs_targeting_dev[]` | 还没合的 PR;含 `number/title/author/is_draft/days_stale` |
@@ -20,7 +20,10 @@
 | `risk.multi_author_files[]` | 被 ≥3 人同时改的文件(作者已大小写去重) |
 | `risk.reverted_prs[]` | 含 revert 的 PR |
 
-> **前提**:`pending_merged_prs` 靠 `git log --merges` + `Merge pull request #N` 识别,假设两仓走标准 GitHub merge commit;squash/rebase 合并会漏报。
+> **前提与已知口径**:
+> - `pending_merged_prs` 靠 `git log --merges` + `Merge pull request #N` 识别,假设两仓走标准 GitHub merge commit;squash/rebase 合并会漏报。
+> - `multi_author_files` 作者仅按**小写 name** 去重(不含 email);一人多 name/email 可能误判(此处用于风险扫描,保守多报可接受)。
+> - `big_prs` 的 churn 是**原始增删行**(含 test/生成物),可能虚高——大 diff 本就该细看,不做净源码过滤。
 
 ## 二、归纳指令
 
@@ -28,7 +31,7 @@
 
 1. **距离 main 总览**:`dev_ahead_main` 提交 / `pending_merged_prs` 个待发布 PR。
 2. **⚠️ 反向雷**(`real_hotfixes` 非空时):列出 + 硬写「发 main 前先把 main merge 回 dev 对齐,重点看部署配置(deploy/compose)冲突,别覆盖线上修复」。
-3. **待发布内容·按功能主线归类**:从 subject/branch 归纳几条主线,每条一句摘要 + 标重点负责人。
+3. **待发布内容·按功能主线归类**:从 subject/branch 归纳几条主线,每条一句摘要 + 标重点负责人(**责任人从 `branch`/subject 推断,别直接读 `merged_by`——那是合并人**;拿不准就 `gh pr view <pr> --json author` 深挖)。
 4. **发布风险·决策发不发**:
    - `schema_changes` → 「会触发线上 DB 迁移,需 DBA 确认」
    - `big_prs` → 逐条点名,看 `files` 判断动了哪些模块
