@@ -158,7 +158,9 @@ def risk_scan(cwd, pending):
     deduped = {f: sorted(dedup_authors(a)) for f, a in fa.items()}
     multi = sorted(({"file": f, "authors": au} for f, au in deduped.items()
                     if len(au) >= MULTI_AUTHOR_MIN), key=lambda x: -len(x["authors"]))
-    # revert 有两种形态:① merge-PR 标题含 revert(在 pending 里);② 直接 Revert "..." 提交(非 merge)。
+    # revert 两路识别:① merge 提交 subject 匹配 revert——注意 %s 是 "Merge pull request #N from owner/分支名",
+    #   命中的实际是**分支名**(如 revert/xxx),不是 PR 标题;② 直接 Revert "..." 提交(git revert 产物,在 --no-merges 里)。
+    # 局限:PR 标题写 revert 但分支非 revert-* 且无 Revert 提交的极端情形会漏(真 PR 标题需 gh pr view 逐个取,107 PR 太贵,不做;归纳层不确定可 gh 深挖)。
     reverted = [{"pr": p["pr"], "subject": p["subject"], "kind": "merge-pr"} for p in pending
                 if re.search(r"revert", p["subject"], re.I)]
     for s in sh(["git", "log", "origin/main..origin/dev", "--no-merges", "--format=%s"], cwd).splitlines():
