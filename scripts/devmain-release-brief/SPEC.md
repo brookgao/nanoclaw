@@ -11,7 +11,7 @@
 | `repo` | 仓名 |
 | `dev_head` | `origin/dev` short-sha(新鲜度指纹,fetch 后即取) |
 | `dev_ahead_main` / `main_ahead_dev` | dev 比 main 多/少几个提交 |
-| `pending_merged_prs[]` | 已合进 dev、main 还没有的 PR;含 `pr/branch/merged_by/date/files_changed/insertions/deletions/merge_hash`。⚠️ `merged_by` 是**点合并的人**(merge commit 作者),**不是 PR 作者**;真责任人看 `branch`(feat/xxx)或 `gh pr view <pr> --json author` |
+| `pending_merged_prs[]` | 已合进 dev、main 还没有的 PR;含 `pr/branch/authors/subjects/merged_by/date/files_changed/insertions/deletions/net_churn/merge_hash`。**`authors`**=PR 分支真实作者列表(**归人用这个**);**`subjects`**=该 PR commit 标题列表(**多为中文,说人话的素材**);**`net_churn`**=排除 test/生成物后的净增删(**判"改动面"用**,比 insertions+deletions 更实);⚠️`merged_by` 是**合并人**不是作者,别用它归责任 |
 | `reverse_commits.real_hotfixes[]` | ⚠️ 只在 main 未回流 dev 的真 hotfix(含 `files`)——发前必须对齐 |
 | `reverse_commits.harmless_release_merges[]` | 过去发布产生的合并提交(无害) |
 | `open_prs_targeting_dev[]` | 还没合的 PR;含 `number/title/author/is_draft/days_stale` |
@@ -27,20 +27,30 @@
 
 ## 二、归纳指令
 
-人话、举实例。开头一句「基于 dev @ <各仓 dev_head>」。每仓输出:
+**目的**:让人一眼决定「今晚该不该发 main」。**中文为主**,英文 slug/PR# 只当括号里的索引。像给人看的周报,不是 git log dump。开头一句「基于 dev @ <各仓 dev_head>」。每仓输出:
 
-1. **距离 main 总览**:`dev_ahead_main` 提交 / `pending_merged_prs` 个待发布 PR。
-2. **⚠️ 反向雷**(`real_hotfixes` 非空时):列出 + 硬写「发 main 前先把 main merge 回 dev 对齐,重点看部署配置(deploy/compose)冲突,别覆盖线上修复」。
-3. **待发布内容·按功能主线归类**:从 subject/branch 归纳几条主线,每条一句摘要 + 标重点负责人(**责任人从 `branch`/subject 推断,别直接读 `merged_by`——那是合并人**;拿不准就 `gh pr view <pr> --json author` 深挖)。
-4. **发布风险·决策发不发**:
-   - `schema_changes` → 「会触发线上 DB 迁移,需 DBA 确认」
-   - `big_prs` → 逐条点名,看 `files` 判断动了哪些模块
-   - `multi_author_files` → 「被多人同时改,合并冲突/副作用需回归」
-   - `reverted_prs` → 「本轮有被 revert 的功能,确认是否已排除」
-5. **等谁·决策发还是缓**:`open_prs_targeting_dev` 里 `days_stale` 小且非 draft → 「接近完成建议等」,提醒作者;停很久/draft → 下轮。
-6. **结论**:每仓一句「今晚建议发/缓 + 发前必做 + 等谁」。
+**① 结论先行**:一句「今晚建议发 / 缓 + 发前必做的 1-2 件事」。
 
-> `real_hotfixes` 空且无 schema/大 PR/多人同改 → 直接「可安全发布」。信息不够别硬猜,现场跑下面深挖命令看内容再下结论。
+**② 距离总览**:dev 领先 main 多少提交 / 多少待发布 PR;反向多少(见③)。
+
+**③ ⚠️ 反向雷**(`real_hotfixes` 非空):列出是什么,硬写「发 main 前先把 main merge 回 dev 对齐,重点看部署配置(deploy/compose)冲突,别覆盖线上修复」。
+
+**④ 大改动·按主线**(核心,别偷懒):
+- **先归主线**:把 `pending_merged_prs` 按功能域归几条主线(如「Moss 管控台」「数据源&工作流」「基础设施」),依据是 `branch` + `subjects`。
+- **中文说清干嘛的**:每条主线用 **`subjects`(多为中文)** 说清**实际做了什么**——`subjects` 常是 RED/GREEN 拆分的 TDD 提交,**要综合成一句人话**,别逐条抄、别只甩英文分支名。反例(禁):`moss-workflow-platform (#4017)`。正例:「Moss 工作流配置平台:新建数据源编辑/工作流发布/权限引导(#4017)」。
+- **归到人**:每条主线标 **`authors`** 里的主要负责人(「主要 by 大杰」)。**别用 `merged_by`**。
+- **松口径列**(用户定:改动面还可以就上):一个 PR 只要 `net_churn` ≳ 100 **或** `files_changed` ≥ 3 **或** 命中风险 → 归进主线列出来。只有单文件的纯 bugfix / 文案 / typo / 依赖 bump → 收进末尾一句「其余 N 个小改动」,不逐条列。
+- 体量用 `net_churn`(不是原始增删,避免 test/生成物虚高)。
+
+**⑤ 发布风险·归到人**(每条都要「什么风险 + 来自谁的什么 PR/文件」):
+- `schema_changes` → 「触发线上 DB 迁移,需 DBA 确认」+ 指出是**谁的哪个 PR** 带来的迁移。
+- `big_prs`(体量用 net churn 复核)→ 逐条点名 + `authors` + 看 `files` 说动了哪些模块。
+- `multi_author_files` → 「<文件> 被 X/Y/Z 同改,合并副作用需回归」(直接点名单里的人)。
+- `reverted_prs` → 「本轮 revert 了 <什么>(by 谁),确认已排除」。
+
+**⑥ 等谁**(`open_prs_targeting_dev` = 还没 merge 的 open PR):列出**谁的什么 PR 还开着**(`author` + `title` + `days_stale`);`days_stale` 小的说「快完成,建议等」,老的说「拖很久,下轮」。**确实没有值得等的 → 明说「无需等,可发」,别写「未标注 days_stale 近零项」这种废话。**
+
+> 无反向雷、无 schema/大改/多人同改 → ④⑤可简,直接结论「可安全发布」。信息不够别硬猜,现场跑下面深挖命令看内容(尤其想确认某 PR 到底干嘛、某人是不是真作者时)。
 
 ## 三、深挖命令清单(在对应仓目录跑)
 

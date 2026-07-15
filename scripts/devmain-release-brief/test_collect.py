@@ -48,6 +48,34 @@ def test_parse_numstat_empty():
     assert collect.parse_numstat("") == (0, 0, 0)
 
 
+def test_numstat_net_excludes_test_and_generated():
+    # 净 churn 排除 test/生成物:只算 src/a.py(10,2)+ src/core.go(20,3)
+    text = ("10\t2\tsrc/a.py\n"
+            "50\t0\tsrc/a_test.py\n"          # 排除:test
+            "30\t5\tpackages/dist/bundle.js\n"  # 排除:dist 生成物
+            "8\t1\tapp/tests/test_b.py\n"       # 排除:tests 目录
+            "9\t9\tpnpm-lock.yaml\n"            # 排除:lock
+            "20\t3\tsrc/core.go")
+    assert collect.numstat_net(text) == (30, 5)
+
+
+def test_numstat_net_keeps_migrations():
+    # 迁移是有意义的改动,不排除
+    text = "5\t0\tserver/backend/migrations/2026_x.sql"
+    assert collect.numstat_net(text) == (5, 0)
+
+
+def test_parse_authors_subjects():
+    text = "大杰\x01feat: Moss 卡片改版\njacob\x01fix: 修复登录\n大杰\x01feat: 加 DDL"
+    authors, subjects = collect.parse_authors_subjects(text)
+    assert authors == ["大杰", "jacob"]                       # 去重、原序
+    assert subjects == ["feat: Moss 卡片改版", "fix: 修复登录", "feat: 加 DDL"]
+
+
+def test_parse_authors_subjects_empty():
+    assert collect.parse_authors_subjects("") == ([], [])
+
+
 # --- fail-fast(git / fetch / gh)---
 
 def test_fetch_raises_on_nonzero(monkeypatch):

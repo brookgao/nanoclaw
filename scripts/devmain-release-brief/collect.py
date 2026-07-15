@@ -66,6 +66,45 @@ def parse_numstat(text):
     return ins, dele, files
 
 
+# 净 churn 排除:test 文件 + 生成物/lock(迁移/普通源码保留),避免体量虚高。
+_NET_EXCLUDE = re.compile(
+    r'(node_modules|(^|/)(dist|build|vendor)/|-lock\.|(^|/)[^/]*lock\.(json|ya?ml)$'
+    r'|go\.(sum|mod)$|\.min\.|\.pb\.go$|_pb2|\.(svg|snap|map)$|generated'
+    r'|(^|/)tests?/|(^|/)test_[^/]*\.py$|_test\.(py|go|ts|tsx)$|\.(test|spec)\.[tj]sx?$)', re.I)
+
+
+def numstat_net(text):
+    ins = dele = 0
+    for ln in text.splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 3:
+            continue
+        a, d, path = parts[0], parts[1], parts[2]
+        if _NET_EXCLUDE.search(path):
+            continue
+        if a.isdigit():
+            ins += int(a)
+        if d.isdigit():
+            dele += int(d)
+    return ins, dele
+
+
+def parse_authors_subjects(text):
+    # 解析 "git log --format=%an\x01%s" 输出 → (去重作者原序, subject 列表)
+    authors, seen, subjects = [], set(), []
+    for ln in text.splitlines():
+        if "\x01" not in ln:
+            continue
+        an, s = ln.split("\x01", 1)
+        an = an.strip()
+        if an and an.lower() not in seen:
+            seen.add(an.lower())
+            authors.append(an)
+        if s.strip():
+            subjects.append(s.strip())
+    return authors, subjects
+
+
 # --- git 副作用层(全 fail-fast)---
 
 def sh(args, cwd):
@@ -104,10 +143,17 @@ def pending_prs(cwd):
     for line in filter(None, out.splitlines()):
         h, an, ci, s = line.split("\x01")
         pr, branch = parse_pr_subject(s)
-        ins, dele, fch = parse_numstat(sh(["git", "diff", "--numstat", h + "^1", h], cwd))
-        # merged_by = merge commit 的 %an(点合并的人),不是 PR 作者;真作者看 branch / gh。
-        prs.append({"pr": pr, "branch": branch, "merged_by": an, "date": ci, "subject": s,
-                    "files_changed": fch, "insertions": ins, "deletions": dele, "merge_hash": h})
+        numstat = sh(["git", "diff", "--numstat", h + "^1", h], cwd)
+        ins, dele, fch = parse_numstat(numstat)
+        net_ins, net_dele = numstat_net(numstat)
+        # authors = PR 分支 commits 的真实作者(归责任人用);subjects = commit 标题(多为中文,给 agent 说人话素材)。
+        authors, subjects = parse_authors_subjects(
+            sh(["git", "log", h + "^1.." + h, "--no-merges", "--format=%an%x01%s"], cwd))
+        # merged_by = merge commit 的 %an(点合并的人),不是 PR 作者。
+        prs.append({"pr": pr, "branch": branch, "authors": authors, "subjects": subjects[:8],
+                    "merged_by": an, "date": ci, "subject": s, "files_changed": fch,
+                    "insertions": ins, "deletions": dele, "net_churn": net_ins + net_dele,
+                    "merge_hash": h})
     return prs
 
 
