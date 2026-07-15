@@ -147,7 +147,7 @@ def risk_scan(cwd, pending):
             big.append({"pr": p["pr"], "subject": p["subject"], "files_changed": p["files_changed"],
                         "churn": p["insertions"] + p["deletions"],
                         "files": [f for f in fl if f][:25], "merge_hash": p["merge_hash"]})
-    log = sh(["git", "log", "origin/main..origin/dev", "--no-merges",
+    log = sh(["git", "-c", "core.quotepath=false", "log", "origin/main..origin/dev", "--no-merges",
               "--format=%x02%an", "--name-only"], cwd)
     cur, fa = None, {}
     for ln in log.splitlines():
