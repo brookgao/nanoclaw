@@ -18,7 +18,7 @@
 | `risk.schema_changes[]` | 动了 DB 迁移的文件 |
 | `risk.big_prs[]` | 增删 >2000 行的超大 PR(含 `files`、`merge_hash`) |
 | `risk.multi_author_files[]` | 被 ≥3 人同时改的文件(作者已大小写去重) |
-| `risk.reverted_prs[]` | 含 revert 的 PR |
+| `risk.reverted_prs[]` | 本轮的 revert;`kind=merge-pr`(merge PR 标题含 revert)或 `kind=commit`(直接 `Revert "..."` 提交) |
 
 > **前提与已知口径**:
 > - `pending_merged_prs` 靠 `git log --merges` + `Merge pull request #N` 识别,假设两仓走标准 GitHub merge commit;squash/rebase 合并会漏报。

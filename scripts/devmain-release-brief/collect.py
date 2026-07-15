@@ -158,8 +158,12 @@ def risk_scan(cwd, pending):
     deduped = {f: sorted(dedup_authors(a)) for f, a in fa.items()}
     multi = sorted(({"file": f, "authors": au} for f, au in deduped.items()
                     if len(au) >= MULTI_AUTHOR_MIN), key=lambda x: -len(x["authors"]))
-    reverted = [{"pr": p["pr"], "subject": p["subject"]} for p in pending
+    # revert 有两种形态:① merge-PR 标题含 revert(在 pending 里);② 直接 Revert "..." 提交(非 merge)。
+    reverted = [{"pr": p["pr"], "subject": p["subject"], "kind": "merge-pr"} for p in pending
                 if re.search(r"revert", p["subject"], re.I)]
+    for s in sh(["git", "log", "origin/main..origin/dev", "--no-merges", "--format=%s"], cwd).splitlines():
+        if re.match(r'^Revert ', s):
+            reverted.append({"pr": None, "subject": s, "kind": "commit"})
     return {"schema_changes": schema, "big_prs": big,
             "multi_author_files": multi[:15], "reverted_prs": reverted}
 
@@ -175,6 +179,9 @@ def collect_repo(name, path, now):
 
 
 def main():
+    # 注:--repo 的 path 由调用方(定时任务 prompt)传入,约定用 ~/nanoclaw-worktrees/ 下路径。
+    # 本脚本不做路径 allowlist:它是通用只读 git 工具、subprocess 全 list 形式(无 shell 注入);
+    # "只能走 guard-safe 路径" 由 host-guard(Bash 层拦 ~/Desktop/vibe-coding/)+ 任务 prompt 双重 enforce,不在此重复。
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", action="append", required=True, help="name=path,可多次")
     ap.add_argument("--out", default="-")
