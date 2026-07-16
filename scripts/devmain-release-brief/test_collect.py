@@ -122,3 +122,50 @@ def test_sh_ok_returns_stdout(monkeypatch):
         stderr = ""
     monkeypatch.setattr(collect.subprocess, "run", lambda *a, **k: R())
     assert collect.sh(["git", "rev-parse", "--short", "origin/dev"], "/tmp/x") == "a1b2c3d"
+
+
+# --- 六维检测(纯函数)---
+
+def test_is_irreversible_migration():
+    assert collect.is_irreversible_migration("ALTER TABLE users DROP COLUMN nick;")
+    assert collect.is_irreversible_migration("drop table old_logs;")
+    assert collect.is_irreversible_migration("TRUNCATE sessions;")
+    assert collect.is_irreversible_migration("DELETE FROM audit WHERE ts<0;")
+    assert collect.is_irreversible_migration("op.drop_column('users','nick')")
+    assert not collect.is_irreversible_migration("CREATE TABLE t (id int);")
+    assert not collect.is_irreversible_migration("op.add_column('t','x')")
+    # 注释里的关键词不该误报
+    assert not collect.is_irreversible_migration("# 别 DELETE FROM 了\nADD COLUMN y int;")
+
+
+def test_is_config_file():
+    assert collect.is_config_file(".env.example")
+    assert collect.is_config_file("deploy/docker-compose.prod.yml")
+    assert collect.is_config_file(".github/workflows/deploy.yml")
+    assert collect.is_config_file("Dockerfile")
+    assert not collect.is_config_file("src/app.py")
+    assert not collect.is_config_file("README.md")
+
+
+def test_has_wip_marker():
+    assert collect.has_wip_marker(["feat: x", "WIP: 调试"])
+    assert collect.has_wip_marker(["fixup! earlier"])
+    assert collect.has_wip_marker(["DO NOT MERGE - temp"])
+    assert not collect.has_wip_marker(["feat: 正常", "fix: 修 bug"])
+
+
+def test_parse_pair_arg():
+    assert collect.parse_pair_arg("nine=/p/nine:origin/main..origin/dev") == \
+        ("nine", "/p/nine", "origin/main", "origin/dev")
+    assert collect.parse_pair_arg("小招=/p/nine:origin/recruit-agent/prod..origin/recruit-agent/dev") == \
+        ("小招", "/p/nine", "origin/recruit-agent/prod", "origin/recruit-agent/dev")
+    with pytest.raises(ValueError):
+        collect.parse_pair_arg("bad-no-range")
+
+
+def test_classify_reverse():
+    assert collect.classify_reverse("Merge pull request #1 from TierIITech/dev", "dev") == "release"
+    assert collect.classify_reverse(
+        "Merge pull request #2 from TierIITech/recruit-agent/dev", "recruit-agent/dev") == "release"
+    assert collect.classify_reverse("Merge pull request #3 from TierIITech/feat/x", "dev") == "other_pr"
+    assert collect.classify_reverse("fix: 直接改 base 的 hotfix", "dev") == "hotfix"

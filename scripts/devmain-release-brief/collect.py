@@ -89,6 +89,57 @@ def numstat_net(text):
     return ins, dele
 
 
+_IRREVERSIBLE_SQL = re.compile(
+    r'\b(DROP\s+(TABLE|COLUMN|INDEX|CONSTRAINT|DATABASE|SCHEMA)|TRUNCATE|DELETE\s+FROM)\b', re.I)
+_IRREVERSIBLE_ORM = re.compile(r'\b(drop_column|drop_table|drop_constraint|drop_index)\s*\(', re.I)
+
+
+def is_irreversible_migration(text):
+    # ③数据安全/⑤可回滚:破坏性迁移(发坏了数据回不来)。先剥行注释(# 和 --)防误报。
+    stripped = "\n".join(re.sub(r'(#|--).*$', '', ln) for ln in text.splitlines())
+    return bool(_IRREVERSIBLE_SQL.search(stripped) or _IRREVERSIBLE_ORM.search(stripped))
+
+
+_CONFIG_PAT = re.compile(
+    r'(^|/)(\.env(\.|$)|docker-compose[^/]*\.ya?ml$|Dockerfile|[^/]*\.conf(\.template)?$'
+    r'|nginx[^/]*\.(conf|template))|(^|/)\.github/workflows/', re.I)
+
+
+def is_config_file(path):
+    # ①变更风险/④配置环境:部署/环境配置文件
+    return bool(_CONFIG_PAT.search(path))
+
+
+_WIP_PAT = re.compile(r'(\bWIP\b|\bfixup!|\bsquash!|DO\s*NOT\s*MERGE|\bTEMP\b|临时提交|调试提交)', re.I)
+
+
+def has_wip_marker(subjects):
+    # ①变更风险:临时/未完成提交混入
+    return any(_WIP_PAT.search(s or "") for s in subjects)
+
+
+def parse_pair_arg(spec):
+    # "label=path:base..head" → (label, path, base, head)。一条发布线 = 一仓一对分支对比。
+    try:
+        label, rest = spec.split("=", 1)
+        path, rng = rest.rsplit(":", 1)
+        base, head = rng.split("..", 1)
+    except ValueError:
+        raise ValueError("pair 格式应为 label=path:base..head,得到:%r" % spec)
+    if not (label and path and base and head):
+        raise ValueError("pair 各字段不能为空:%r" % spec)
+    return label, path, base, head
+
+
+def classify_reverse(subject, head_branch):
+    # base 有 head 没有的提交分类:release(发布合并)/ other_pr(其它 PR 合并)/ hotfix(非 merge 直接提交)
+    if re.match(r"Merge pull request #\d+ from \S+?/%s$" % re.escape(head_branch), subject):
+        return "release"
+    if re.match(r"Merge pull request #\d+ from ", subject):
+        return "other_pr"
+    return "hotfix"
+
+
 def parse_authors_subjects(text):
     # 解析 "git log --format=%an\x01%s" 输出 → (去重作者原序, subject 列表)
     authors, seen, subjects = [], set(), []
