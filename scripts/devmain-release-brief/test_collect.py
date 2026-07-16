@@ -225,7 +225,7 @@ def test_parse_force_pushes():
     assert r[0]["actor"] == "zyue0956-bit"
     assert r[0]["before"] == "535985ca"
     assert r[0]["after"] == "316ccf55"
-    assert r[0]["timestamp"] == "2026-07-10T13:56:21Z"
+    assert r[0]["timestamp"] == "2026-07-10T21:56:21+08:00"   # UTC 13:56 → 北京 21:56
 
 
 def test_parse_force_pushes_empty():
@@ -257,11 +257,20 @@ def test_branch_audit_fail_fast(monkeypatch):
 
 
 def test_last_merge(monkeypatch):
+    # git %cI 常带各提交者本地时区(此处 -07:00),必须转北京
     monkeypatch.setattr(collect, "sh", lambda a, c:
-        "2026-07-15T07:56:00+08:00\x01Merge pull request #4170 from TierIITech/fix/x")
+        "2026-07-15T07:56:00-07:00\x01Merge pull request #4170 from TierIITech/fix/x")
     r = collect.last_merge("/x", "origin/main")
-    assert r["date"] == "2026-07-15T07:56:00+08:00"
+    assert r["date"] == "2026-07-15T22:56:00+08:00"   # -07:00 07:56 → 北京 22:56
     assert "#4170" in r["subject"]
+
+
+def test_to_cst():
+    assert collect.to_cst("2026-07-10T13:56:21Z") == "2026-07-10T21:56:21+08:00"       # UTC→北京
+    assert collect.to_cst("2026-07-15T07:56:00-07:00") == "2026-07-15T22:56:00+08:00"  # 太平洋→北京
+    assert collect.to_cst("2026-07-16T12:00:00+08:00") == "2026-07-16T12:00:00+08:00"  # 已北京不变
+    assert collect.to_cst("") == ""                                                     # 空原样
+    assert collect.to_cst("garbage") == "garbage"                                       # 无法解析原样
 
 
 def test_last_merge_none(monkeypatch):

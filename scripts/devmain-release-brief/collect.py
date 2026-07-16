@@ -11,8 +11,9 @@
 失败即非零退出(fail-fast):任一线 git fetch / gh / 其它 git 命令失败 → 抛错 → 退出码非零。
 """
 import argparse, json, re, subprocess, sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
+CST = timezone(timedelta(hours=8))   # 北京时间;所有对外展示的时间统一转这个时区
 BIG_PR_LINES = 2000
 MULTI_AUTHOR_MIN = 3
 SCHEMA_PAT = re.compile(r'(\bmigrations?/|migrations?\.py$|\.sql$)', re.I)
@@ -49,6 +50,17 @@ def dedup_authors(names):
 def compute_days_stale(updated_at_iso, now):
     upd = datetime.fromisoformat(updated_at_iso.replace("Z", "+00:00"))
     return (now - upd).days
+
+
+def to_cst(iso_str):
+    # 把带 Z 或任意时区偏移的 ISO 时间统一转成北京时间(+08:00)。空串/无法解析原样返回。
+    # git %cI 带的是各提交者本地时区(乱)、gh API 是 UTC(Z)——展示前都过这里,口径统一。
+    if not iso_str:
+        return iso_str
+    try:
+        return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(CST).isoformat()
+    except ValueError:
+        return iso_str
 
 
 def parse_numstat(text):
@@ -172,7 +184,7 @@ def parse_force_pushes(json_text):
         out.append({"actor": (a.get("actor") or {}).get("login", "?"),
                     "before": (a.get("before") or "")[:8],
                     "after": (a.get("after") or "")[:8],
-                    "timestamp": a.get("timestamp", "")})
+                    "timestamp": to_cst(a.get("timestamp", ""))})
     return out
 
 
@@ -233,7 +245,7 @@ def last_merge(cwd, base):
     if "\x01" not in out:
         return {"date": "", "subject": ""}
     d, s = out.split("\x01", 1)
-    return {"date": d, "subject": s}
+    return {"date": to_cst(d), "subject": s}
 
 
 def repo_slug(cwd):
@@ -271,7 +283,7 @@ def pending_prs(cwd, base, head):
             sh(["git", "log", h + "^1.." + h, "--no-merges", "--format=%an%x01%s"], cwd))
         # merged_by = merge commit 的 %an(点合并的人),不是 PR 作者。
         prs.append({"pr": pr, "branch": branch, "authors": authors, "subjects": subjects[:8],
-                    "merged_by": an, "date": ci, "subject": s, "files_changed": fch,
+                    "merged_by": an, "date": to_cst(ci), "subject": s, "files_changed": fch,
                     "insertions": ins, "deletions": dele, "net_churn": net_ins + net_dele,
                     "merge_hash": h})
     return prs
@@ -283,7 +295,7 @@ def reverse_commits(cwd, base, head, head_branch):
     release, other_pr, hotfix = [], [], []
     for line in filter(None, out.splitlines()):
         h, an, ci, s = line.split("\x01")
-        rec = {"hash": h[:9], "author": an, "date": ci, "subject": s}
+        rec = {"hash": h[:9], "author": an, "date": to_cst(ci), "subject": s}
         cls = classify_reverse(s, head_branch)
         if cls == "release":
             release.append(rec)
@@ -303,7 +315,7 @@ def open_prs(cwd, head, now):
     for p in json.loads(j or "[]"):
         res.append({"number": p["number"], "title": p["title"],
                     "author": (p["author"] or {}).get("login", "?"), "is_draft": p["isDraft"],
-                    "updated_at": p["updatedAt"], "days_stale": compute_days_stale(p["updatedAt"], now)})
+                    "updated_at": to_cst(p["updatedAt"]), "days_stale": compute_days_stale(p["updatedAt"], now)})
     return sorted(res, key=lambda x: x["days_stale"])
 
 
@@ -390,7 +402,7 @@ def main():
                     help="label=path:base..head,可多次(一条发布线一个)")
     ap.add_argument("--out", default="-")
     a = ap.parse_args()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(CST)
     lines = [collect_line(*parse_pair_arg(spec), now) for spec in a.pair]
     doc = {"schema": "devmain-digest/v2", "generated_at": now.isoformat(), "lines": lines}
     txt = json.dumps(doc, ensure_ascii=False, indent=2)
