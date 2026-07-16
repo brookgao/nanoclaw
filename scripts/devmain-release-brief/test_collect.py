@@ -230,6 +230,18 @@ def test_parse_force_pushes():
 
 def test_parse_force_pushes_empty():
     assert collect.parse_force_pushes("[]") == []
+    assert collect.parse_force_pushes("") == []
+
+
+def test_parse_force_pushes_concatenated_pages():
+    # 跨 gh 版本稳健:兼容 --paginate 若输出"多页各自独立数组拼接"形态(raw_decode 逐段)
+    two_pages = ('[{"activity_type":"force_push","actor":{"login":"a"},'
+                 '"timestamp":"2026-07-10T00:00:00Z","before":"11111111x","after":"22222222x"}]\n'
+                 '[{"activity_type":"force_push","actor":{"login":"b"},'
+                 '"timestamp":"2026-07-09T00:00:00Z","before":"33333333x","after":"44444444x"}]')
+    r = collect.parse_force_pushes(two_pages)
+    assert len(r) == 2
+    assert [x["actor"] for x in r] == ["a", "b"]
 
 
 def test_branch_audit_fail_fast(monkeypatch):

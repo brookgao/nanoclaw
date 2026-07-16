@@ -153,8 +153,20 @@ def remote_branch(ref):
 
 def parse_force_pushes(json_text):
     # gh activity API 已服务端过滤 activity_type=force_push;此处防御性再过滤。days_ago 由 branch_audit 补。
+    # gh api --paginate 对**数组**响应:gh 2.87.3 实测合并为单一数组(per_page=1 强制多页仍单文档 len=4)。
+    # 为跨 gh 版本稳健,用 raw_decode 逐段解析——单一数组 / 多页拼接数组两种形态都吃;
+    # 非法 JSON 仍抛(JSONDecodeError → fail-fast,不静默)。
+    text = (json_text or "").strip()
+    items, dec, idx = [], json.JSONDecoder(), 0
+    while idx < len(text):
+        while idx < len(text) and text[idx].isspace():
+            idx += 1
+        if idx >= len(text):
+            break
+        doc, idx = dec.raw_decode(text, idx)
+        items.extend(doc if isinstance(doc, list) else [doc])
     out = []
-    for a in json.loads(json_text or "[]"):
+    for a in items:
         if a.get("activity_type") != "force_push":
             continue
         out.append({"actor": (a.get("actor") or {}).get("login", "?"),
