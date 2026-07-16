@@ -33,11 +33,11 @@ flowchart TD
   PP --> CL["collect_line(label,path,base,head,now)<br/>(collect.py 编排)"]
   CL --> FET["fetch(path,base,head)<br/>git fetch origin base head"]
   CL --> PEND["pending_prs(path,base,head)<br/>git log base..head --merges"]
-  CL --> REV["reverse_commits(path,head)<br/>git log head..base → classify_reverse"]
+  CL --> REV["reverse_commits(path,base,head,head_branch)<br/>git log head..base → classify_reverse"]
   CL --> OPEN["open_prs(path,head,now)<br/>gh pr list --base head"]
-  CL --> RISK["risk_scan(path,base,head,pending)<br/>+ 不可逆迁移/配置/WIP"]
-  CL --> AUD["branch_audit(path,base)<br/>gh api repos/{slug}/activity?activity_type=force_push"]
-  AUD --> PFP["parse_force_pushes(json,base_ref)<br/>(纯,新增)"]
+  CL --> RISK["risk_scan(path,base,head,pending)<br/>+ 不可逆迁移(git diff加行)/配置/WIP"]
+  CL --> AUD["branch_audit(path,base,now)<br/>gh api --paginate .../activity?activity_type=force_push → +days_ago"]
+  AUD --> PFP["parse_force_pushes(json_text)<br/>(纯,新增)"]
   REV --> CR["classify_reverse<br/>(纯,已测) release/other_pr/hotfix"]
   RISK --> IM["is_irreversible_migration / is_config_file / has_wip_marker<br/>(纯,已测)"]
   CL --> DOC["lines[] → devmain-digest/v2 JSON"]
@@ -52,7 +52,7 @@ flowchart TD
 |---|---|---|---|
 | ① 变更风险 | pending PR subjects | `has_wip_marker` | `risk.wip_prs[]` |
 | ② 分支完整性 | rev-list 计数 + base 最后提交日期 | collect_line 内联 | `dev_ahead_base` / `base_ahead_dev` / `base_stale_days` |
-| ③ 数据安全 | schema 文件内容(git show) | `is_irreversible_migration` | `risk.irreversible_migrations[]` |
+| ③ 数据安全 | schema 文件 diff 加行(git diff rng -- f) | `is_irreversible_migration` | `risk.irreversible_migrations[]` |
 | ④ 配置环境 | diff --name-only | `is_config_file` | `risk.config_changes[]` |
 | ⑤ 可回滚 | 同③(不可逆迁移=不可回滚) | `is_irreversible_migration` | 复用 `risk.irreversible_migrations[]` |
 | ⑥ 审计 | GitHub activity API | `parse_force_pushes` | `branch_audit.force_pushes[]` |
@@ -336,7 +336,7 @@ def test_risk_scan_six_dim(monkeypatch):
             "multi_author_files": multi[:15], "reverted_prs": reverted,
             "config_changes": config, "irreversible_migrations": irreversible, "wip_prs": wip}
 ```
-> 注：`is_irreversible_migration` 对 `git show head:file` 的**全文**扫描；`irreversible` 的 `try/except GitError` 是唯一允许的"跳过单文件"——文件取不到是客观信号缺失，非任务失败（不违反 fail-fast：fetch/gh 仍整体 fail-fast，这里只是单个 schema 文件内容不可得时不误报）。
+> ⚠️ 实现者注意：**不要**用 `git show head:file` + try/except（那是被 Codex round-3 否掉的旧法，会吞失败漏报）。以上 `git diff rng -- f` 扫加行是唯一正确实现。
 
 - [ ] **Step 4: 跑测试确认 GREEN** — `python3 -m pytest test_collect.py -v` → 29 passed（28 + 1）
 - [ ] **Step 5: Commit** — `git commit -am "feat(devmain-brief): risk_scan 六维扩展(不可逆迁移/配置/WIP)"`
@@ -429,7 +429,7 @@ def main():
 - `collect_line(label,path,base,head,now)` — Task1 定义、Task2 加 branch_audit 行、Task4 main 调用，一致 ✓
 - `reverse_commits(cwd,base,head,head_branch)` — Task1 定义、collect_line 传 `(path,base,head,hb)` ✓
 - `risk_scan(cwd,base,head,pending)` — Task1 改签名、Task3 扩返回、collect_line 传 `(path,base,head,pending)` ✓
-- `branch_audit(cwd,base)` / `repo_slug(cwd)` / `parse_force_pushes(json_text)` / `remote_branch(ref)` — Task2/Task1 定义，调用点一致 ✓
+- `branch_audit(cwd,base,now)` / `repo_slug(cwd)` / `parse_force_pushes(json_text)`（纯，days_ago 由 branch_audit 补） / `remote_branch(ref)` — Task2/Task1 定义，调用点一致 ✓
 - 输出字段 `reverse_commits.{release_merges,other_pr_merges,real_hotfixes}` — Task1 与 Task4 SPEC 描述一致 ✓
 
 **4. 本地实证**（2026-07-16 已跑，见 plan 编写记录）：
