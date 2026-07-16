@@ -71,7 +71,9 @@
 **小节 3 · 大改动·按主线**（压缩，绝不逐个 PR 罗列；无待发布 → `safe:true`、body 写「无大改动」）：把 `pending_merged_prs` 按功能域归几条主线，每条=一小段综述：在干嘛（`subjects` 中文综合）+ 聚合数「N 个 PR / 约 M 行」（M 用 `net_churn` 合计）+ 点名 1-3 关键 PR（`#号`,作者）+ 主要负责人（`authors`，「主要 by 大杰」，别用 `merged_by`）。单文件 bugfix/文案/typo/依赖 bump → 末尾「其余 N 个小改动（涉及 X、Y）」一句带过。
 > 正例：**Boss 简历回捞/推荐（主要 by milo+Jacob · 12 PR / ~2.6 万行）**：回捞 worker 前台抢占与死信重做、推荐页状态机、判重改姓名+geekID。关键：#682 死信重做(milo)、#671 竞态加固(jacob)。
 
-**小节 4 · 待合入 PR（发布前可等）**：`open_prs_targeting_dev` → 谁的什么 open PR + `days_stale`；小的「快完成，建议等」，老的「拖很久，下轮」。无 → `safe:true`、body 写「无 open PR，可发」。
+**小节 4 · 待合入 PR（发布前可等）**：`open_prs_targeting_dev`。无 → `safe:true`、body 写「无 open PR，可发」。有则：
+- **≤ ~8 个**：直接列，谁的什么 PR + `days_stale`；小的「快完成，建议等」，老的「拖很久，下轮」。
+- **多（如 >8）→ 按作者归组**（首行「共 N 个 open PR」，然后每个作者一条）：`· 作者（个数）：近期几个关键 #号+短标题（带天数，推进中）；⚠️ 点出最老/该清的（days_stale）`。**每个作者最多 3 行**，PR 多的作者只挑近期活跃 + 最老的点名，中间的省略或聚合，别逐个罗列。按作者 open PR 数从多到少排。
 
 **总检（`summary`）**：一行说哪几线/哪几维触警、健康与否，最重的排前。build_card 渲染成末尾「🩺 三线总检」。
 
