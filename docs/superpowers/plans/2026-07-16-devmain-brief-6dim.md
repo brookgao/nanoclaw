@@ -31,7 +31,7 @@ codex_effort_why: 接入新 GitHub activity API + 三线数据模型重构 + 修
 flowchart TD
   CLI["main() --pair label=path:base..head<br/>(collect.py)"] --> PP["parse_pair_arg<br/>(纯,已测)"]
   PP --> CL["collect_line(label,path,base,head,now)<br/>(collect.py 编排)"]
-  CL --> FET["fetch(path,base,head)<br/>git fetch origin base head"]
+  CL --> FET["fetch(path,base,head)<br/>git fetch origin +rb:refs/remotes/origin/rb ...(显式refspec)"]
   CL --> PEND["pending_prs(path,base,head)<br/>git log base..head --merges"]
   CL --> REV["reverse_commits(path,base,head,head_branch)<br/>git log head..base → classify_reverse"]
   CL --> OPEN["open_prs(path,head,now)<br/>gh pr list --base head"]
@@ -58,7 +58,7 @@ flowchart TD
 | ⑥ 审计 | GitHub activity API | `parse_force_pushes` | `branch_audit.force_pushes[]` |
 | (反向防误报) | head..base 提交 | `classify_reverse` | `reverse_commits.{release,other_pr,real_hotfixes}[]` |
 
-**缺口检查**：⑤可回滚无独立数据源——不可逆迁移即"发坏退不回"，与③同源，SPEC 归纳时同一条同时标 ③/⑤（沿用已定稿设计）。force-push(⑥) 与 base 领先/久未更新(②) 共同支撑"疑似回滚"判断，但 collect 只出**客观信号**，"疑似回滚"结论由 SPEC 归纳层下（避免 collect 硬编阈值误判）。
+**缺口检查**：⑤可回滚无独立数据源——不可逆迁移即"发坏退不回"，与③同源，SPEC 归纳时同一条同时标 ③/⑤（沿用已定稿设计）。**"疑似回滚"判定口径统一（Codex round-6 MAJOR，矩阵与 SPEC 阈值对齐）**：base 是 main/prod 保护分支，正常流程绝不该被 force-push——故 `days_ago<=14` 的近期 force-push **本身即确凿的回滚/异常强推信号**（#707 就是纯 force-push 把 main 回退），SPEC 直接据此报 🔴 疑似回滚；`base_stale_days>14` / `dev_ahead_base>100` 是**独立的**发布积压/久未更新信号（各自单独告警），不是疑似回滚的前置条件。collect 只出客观信号（force_pushes+days_ago、计数、天数），阈值判定写在 SPEC §二（确定性规则，非 collect 硬编）。
 
 ## 分支对 → 三条发布线
 
@@ -144,7 +144,12 @@ def remote_branch(ref):
 ```python
 def fetch(cwd, base, head):
     rb, rh = remote_branch(base), remote_branch(head)
-    r = subprocess.run(["git", "fetch", "origin", rb, rh, "--quiet"],
+    # 显式 refspec:保证 refs/remotes/origin/* 被刷新。裸 `git fetch origin <br>` 可能只更
+    # FETCH_HEAD 不动 remote-tracking → 后续 origin/base..origin/head 用旧数据(成功但静默错,
+    # Codex round-6 CRITICAL)。实测显式 refspec 对含斜杠分支(recruit-agent/dev)也正确刷新。
+    r = subprocess.run(["git", "fetch", "origin",
+                        "+%s:refs/remotes/origin/%s" % (rb, rb),
+                        "+%s:refs/remotes/origin/%s" % (rh, rh), "--quiet"],
                        cwd=cwd, capture_output=True, text=True)
     if r.returncode != 0:
         raise FetchError("git fetch failed in %s: %s" % (cwd, (r.stderr or "").strip()))
@@ -403,7 +408,7 @@ def main():
     - 📉 **base 久未更新**：`base_stale_days > 14`。
     - ⚠️ **未回流 hotfix**：`reverse_commits.real_hotfixes` 非空（这才是"发前必须对齐"的真信号；`release_merges`/`other_pr_merges` 只做计数不告警）。
     - 全部不触发 → 一行绿字"分支健康"。
-  - §三 已知局限：加"force_pushes per_page=100 上限（force-push 事件极稀，实际无漏）"、"irreversible 仅扫 schema 文件全文（非 schema 文件里的裸 SQL 不查）"。
+  - §三 已知局限：加"force_pushes 用 `gh api --paginate` 翻全部页拼接（无窗口/条数限制，force-push 事件本就极稀）"、"irreversible 仅扫 schema 文件的 **diff 新增行**（非 schema 文件里的裸 SQL、以及已存在未改动的破坏性 DDL 不查）"。
 
 - [ ] **Step 6: Commit** — `git commit -am "feat(devmain-brief): main --pair + digest v2 + SPEC 三线六维"`
 
@@ -441,4 +446,5 @@ def main():
 **测试基线锚点**：22 passed（commit 7cd29c4）。每 Task 后总数应为 25→28→29→30。
 **Round-1 Claude critic 修复**：CRITICAL(fetch 测试签名+计数) + MAJOR(force-push 改 --paginate) + MINOR×2(branch_audit fail-fast 测试 / docstring --repo→--pair)。
 **Round-3 Codex 修复**：CRITICAL(不可逆迁移弃 git show+try/except 改 git diff 扫加行,fail-fast 完整) + MAJOR×3(risk_scan 三处 range 用 rng 统一 / force-push 加 days_ago + SPEC 14 天窗 / SPEC 补确定性阈值 疑似回滚·积压·久未更新·未回流hotfix) + MINOR×2(test 补 import sys,json / plan:7 措辞纠正 parse_force_pushes 属 Task2 新增)。均已并入并本地实证(diff 扫加行 DROP→True/ADD→False)。
+**Round-6 Codex 计划评审修复**：CRITICAL(fetch 用显式 refspec `+rb:refs/remotes/origin/rb` 保证刷新 remote-tracking,裸 fetch 可能只更 FETCH_HEAD → 旧数据;已实测含斜杠分支正确刷新) + MAJOR×2(SPEC局限删"per_page=100 上限"改"--paginate 翻全部页无窗口" / "疑似回滚"口径统一:近14天 force-push 本身即信号,积压·久未更新为独立告警非前置) + MINOR(SPEC局限"扫全文"→"扫 diff 新增行")。
 
