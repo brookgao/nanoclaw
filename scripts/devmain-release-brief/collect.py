@@ -221,6 +221,9 @@ def repo_slug(cwd):
 def branch_audit(cwd, base, now):
     slug = repo_slug(cwd)
     ref = "refs/heads/" + remote_branch(base)
+    # 注:/activity 返回 JSON **数组**,gh api --paginate 对数组响应自动**合并多页为单一数组**
+    # (实测 per_page=1 强制 4 页 → json.loads 得单 list len=4),故无需 --slurp;
+    # --slurp 只对**对象**响应需要。json.loads 直接可解析。
     j = gh_json(["gh", "api", "--paginate",
                  "repos/%s/activity?ref=%s&activity_type=force_push&per_page=100" % (slug, ref)], cwd)
     fps = parse_force_pushes(j)
@@ -284,15 +287,9 @@ def open_prs(cwd, head, now):
 
 def risk_scan(cwd, base, head, pending):
     rng = "%s..%s" % (base, head)
-    files = sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", rng], cwd).splitlines()
-    schema = sorted({f for f in files if is_schema_file(f)})
-    big = []
-    for p in pending:
-        if p["insertions"] + p["deletions"] > BIG_PR_LINES:
-            fl = sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", p["merge_hash"] + "^1", p["merge_hash"]], cwd).splitlines()
-            big.append({"pr": p["pr"], "subject": p["subject"], "files_changed": p["files_changed"],
-                        "churn": p["insertions"] + p["deletions"],
-                        "files": [f for f in fl if f][:25], "merge_hash": p["merge_hash"]})
+    # 文件集从**被发布的提交**(dev-not-base 的非 merge 提交)取,同时得到 file→authors。
+    # 不用 `git diff base..head --name-only`:那是两端树差异,会把 base 侧单独改的文件也算进来
+    # (base/dev 分叉)→ 假阳性风险 + 无 dev 侧作者可归。这里只看"dev 真正改了什么"。
     log = sh(["git", "-c", "core.quotepath=false", "log", rng, "--no-merges",
               "--format=%x02%an", "--name-only"], cwd)
     cur, fa = None, {}
@@ -302,8 +299,17 @@ def risk_scan(cwd, base, head, pending):
         elif ln.strip() and cur:
             fa.setdefault(ln, []).append(cur)
     deduped = {f: sorted(dedup_authors(a)) for f, a in fa.items()}
+    files = sorted(deduped)
+    schema = sorted({f for f in files if is_schema_file(f)})
     multi = sorted(({"file": f, "authors": au} for f, au in deduped.items()
                     if len(au) >= MULTI_AUTHOR_MIN), key=lambda x: -len(x["authors"]))
+    big = []
+    for p in pending:
+        if p["insertions"] + p["deletions"] > BIG_PR_LINES:
+            fl = sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", p["merge_hash"] + "^1", p["merge_hash"]], cwd).splitlines()
+            big.append({"pr": p["pr"], "subject": p["subject"], "files_changed": p["files_changed"],
+                        "churn": p["insertions"] + p["deletions"],
+                        "files": [f for f in fl if f][:25], "merge_hash": p["merge_hash"]})
     # revert 两路识别:① merge 提交 subject 匹配 revert——注意 %s 是 "Merge pull request #N from owner/分支名",
     #   命中的实际是**分支名**(如 revert/xxx),不是 PR 标题;② 直接 Revert "..." 提交(git revert 产物,在 --no-merges 里)。
     # 局限:PR 标题写 revert 但分支非 revert-* 且无 Revert 提交的极端情形会漏(真 PR 标题需 gh pr view 逐个取,107 PR 太贵,不做;归纳层不确定可 gh 深挖)。
@@ -324,9 +330,15 @@ def risk_scan(cwd, base, head, pending):
             irreversible.append(f)
     wip = [{"pr": p["pr"], "subjects": [s for s in p["subjects"] if has_wip_marker([s])]}
            for p in pending if has_wip_marker(p["subjects"])]
-    return {"schema_changes": schema, "big_prs": big,
+
+    # 归人:用 deduped(file→authors,上面 multi_author 已建)给风险文件挂作者,
+    # 否则归纳层拿到裸文件名无法"每条风险归到人"(pending_merged_prs 不带每 PR 文件列表)。
+    def with_authors(paths):
+        return [{"file": f, "authors": deduped.get(f, [])} for f in paths]
+    return {"schema_changes": with_authors(schema), "big_prs": big,
             "multi_author_files": multi[:15], "reverted_prs": reverted,
-            "config_changes": config, "irreversible_migrations": irreversible, "wip_prs": wip}
+            "config_changes": with_authors(config),
+            "irreversible_migrations": with_authors(irreversible), "wip_prs": wip}
 
 
 def collect_line(label, path, base, head, now):

@@ -27,9 +27,9 @@
 | `reverse_commits.release_merges[]` | 发布合并到 head 的 merge（无害，仅计数） |
 | `reverse_commits.other_pr_merges[]` | 其它 PR 的 merge（仅计数，**不是 hotfix，别报"必须对齐"**） |
 | `open_prs_targeting_dev[]` | 还没合的 open PR；含 `number/title/author/is_draft/days_stale` |
-| `risk.schema_changes[]` | 动了 DB 迁移的文件 |
-| `risk.irreversible_migrations[]` | 含破坏性 DDL（DROP/TRUNCATE/DELETE）的 schema 文件——③数据安全/⑤可回滚 |
-| `risk.config_changes[]` | 部署/环境配置文件（.env/compose/CI/Dockerfile）——④配置环境 |
+| `risk.schema_changes[]` | 动了 DB 迁移的文件，每项 `{file, authors}`（authors 已归人，直接用） |
+| `risk.irreversible_migrations[]` | 含破坏性 DDL（DROP/TRUNCATE/DELETE）的 schema 文件，每项 `{file, authors}`——③数据安全/⑤可回滚 |
+| `risk.config_changes[]` | 部署/环境配置文件（.env/compose/CI/Dockerfile），每项 `{file, authors}`——④配置环境 |
 | `risk.wip_prs[]` | subject 含 WIP/临时标记的 PR——①变更风险 |
 | `risk.big_prs[]` / `risk.multi_author_files[]` / `risk.reverted_prs[]` | 超大 PR / 多人同改文件 / 本轮 revert（同 v1） |
 | `branch_audit.force_pushes[]` | base 分支的 force-push 事件；每条含 `actor/before/after/timestamp/days_ago`——⑥审计 |
@@ -55,9 +55,9 @@
 - ⚠️ **未回流 hotfix [②]**：`reverse_commits.real_hotfixes` 非空 → 大白话说这几个直接提交改了啥（谁），并写「发前先把 base 合回 head，重点看部署配置别覆盖线上已修的」。`release_merges`/`other_pr_merges` **只做背景计数、不告警**。
 
 **③ ⚠️ 发布风险·逐条归人**（每条「什么风险 + 谁的什么 PR/文件」，`dev_ahead_base==0` 时可整段省略）：
-- 🔴 **不可逆迁移 [③/⑤]**：`risk.irreversible_migrations` → 「含 DROP/TRUNCATE，发坏退不回」+ 指出谁的哪个 PR（对 `pending_merged_prs` 找含该文件的 PR 取 `authors`）。
-- 🟡 **schema 迁移 [①]**：`risk.schema_changes` → 「触发 DB 迁移，需 DBA 确认」+ 归人。
-- 🟡 **配置变动 [④]**：`risk.config_changes` → 「动了部署/环境配置」+ 归人 + 「注意同步 prod」。
+- 🔴 **不可逆迁移 [③/⑤]**：`risk.irreversible_migrations` → 「含 DROP/TRUNCATE，发坏退不回」+ 直接用该项 `authors` 归人。
+- 🟡 **schema 迁移 [①]**：`risk.schema_changes` → 「触发 DB 迁移，需 DBA 确认」+ 用该项 `authors` 归人。
+- 🟡 **配置变动 [④]**：`risk.config_changes` → 「动了部署/环境配置」+ 用该项 `authors` 归人 + 「注意同步 prod」。
 - 🟡 **超大 PR [①]**：`risk.big_prs` 逐条点名 + `authors` + `files` 说动了哪些模块。
 - 🟡 **多人同改 [①]**：`risk.multi_author_files` → 「<文件> 被 X/Y/Z 同改，回归」。
 - 🟡 **revert [①]**：`risk.reverted_prs` → 「本轮 revert 了什么（谁），确认已排除」。
@@ -77,6 +77,7 @@
 - `pending_merged_prs` 靠 `git log base..head --merges` + `Merge pull request #N` 识别，假设标准 GitHub merge commit；squash/rebase 合并会漏报。
 - **reverse 三分类**：`real_hotfixes` = base 有 head 没有的**非 merge 直接提交**。⚠️ 在 base 与 head 关系非常规的线（如小招 recruit-agent，prod 领先 dev 很多），这里会包含大量 prod 独有的普通历史提交（feat/fix/test），**它们不是待回流的 hotfix**——所以 `dev_ahead_base==0` 时本字段不作发布阻塞（见 §二①）。
 - `force_pushes` 用 `gh api --paginate` 翻全部页拼接（无窗口/条数限制，force-push 事件本就极稀）；`days_ago<=14` 才进告警。
+- `schema_changes`/`config_changes`/`irreversible_migrations` 的文件集取自**被发布的提交**（`git log base..head --no-merges` 所动文件），非两端树 diff——避免把 base 侧单独改的文件（base/dev 分叉）误报，且每项能归到 dev 侧作者。极端情形：仅在 merge commit 里做的冲突解决改动会漏（罕见）。
 - `irreversible_migrations` 仅扫 schema 文件的 **diff 新增行**（非 schema 文件里的裸 SQL、已存在未改动的破坏性 DDL 不查）。
 - `multi_author_files` 作者仅按小写 name 去重；`big_prs` churn 含 test/生成物；`reverted_prs` 双路检测（极端情形会漏）。
 

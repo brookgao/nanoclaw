@@ -268,13 +268,17 @@ def test_risk_scan_six_dim(monkeypatch):
             return "db/migrations/001_drop.sql\ndeploy/docker-compose.prod.yml\nsrc/app.py"
         if "diff" in args and "db/migrations/001_drop.sql" in args:
             return "+ALTER TABLE users DROP COLUMN nick;\n- 旧行"
-        if "log" in args:
+        if "log" in args and "--name-only" in args:   # multi_author / 归人扫描
+            return "\x02milo\ndb/migrations/001_drop.sql\n\x02晴初\ndeploy/docker-compose.prod.yml"
+        if "log" in args:                              # reverted 扫描(--format=%s)
             return ""
         return ""
     monkeypatch.setattr(collect, "sh", fake_sh)
     r = collect.risk_scan("/x", "origin/main", "origin/dev", pending)
-    assert r["config_changes"] == ["deploy/docker-compose.prod.yml"]
-    assert r["irreversible_migrations"] == ["db/migrations/001_drop.sql"]
+    # 归人:每条风险带 {file, authors}(Codex Phase6 MAJOR)
+    assert r["config_changes"] == [{"file": "deploy/docker-compose.prod.yml", "authors": ["晴初"]}]
+    assert r["irreversible_migrations"] == [{"file": "db/migrations/001_drop.sql", "authors": ["milo"]}]
+    assert r["schema_changes"] == [{"file": "db/migrations/001_drop.sql", "authors": ["milo"]}]
     assert len(r["wip_prs"]) == 1
     assert r["wip_prs"][0]["pr"] == "1"
     assert r["wip_prs"][0]["subjects"] == ["WIP: 调试"]
