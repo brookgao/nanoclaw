@@ -4,7 +4,7 @@
 
 **Goal:** 把 devmain 发布简报从"单仓固定 main..dev"升级成"可配置分支对 × 三条发布线 + SRE 六维告警"，并修复反向提交误报 CRITICAL。
 
-**Architecture:** 纯函数层（六维检测 + pair 解析 + reverse 三分类 + force-push 解析）已就绪（commit 9b1703c，22 测试过）；本 plan 只改**编排层**——把硬编码的 `origin/main..origin/dev` 泛化成 `base..head` 参数，新增 `branch_audit`（GitHub activity API 查 force-push）接入六维告警，`collect_repo`→`collect_line`，`main` 从 `--repo` 改 `--pair`，输出 schema v1→v2（`repos[]`→`lines[]`），同步升级 SPEC.md。
+**Architecture:** 纯函数层（六维检测 `is_irreversible_migration`/`is_config_file`/`has_wip_marker` + `parse_pair_arg` + `classify_reverse`）已就绪（commit 9b1703c，22 测试过）；`parse_force_pushes` 是本 plan Task 2 **新增**的纯函数（9b1703c 尚无）。本 plan 只改**编排层**——把硬编码的 `origin/main..origin/dev` 泛化成 `base..head` 参数，新增 `branch_audit`（GitHub activity API 查 force-push）接入六维告警，`collect_repo`→`collect_line`，`main` 从 `--repo` 改 `--pair`，输出 schema v1→v2（`repos[]`→`lines[]`），同步升级 SPEC.md。
 
 **Tech Stack:** Python 3 标准库 only；`git` + `gh`（已登录）；pytest（现有 test_collect.py，22 passed）。
 
@@ -157,7 +157,7 @@ def head_sha(cwd, head):
 
 `open_prs(cwd, head, now)`：`--base` 参数值从字面 `"dev"` 换成 `remote_branch(head)`。
 
-`risk_scan(cwd, base, head, pending)`：把两处 `origin/main..origin/dev` 换成 `"%s..%s" % (base, head)`（六维新增字段在 Task 3）。
+`risk_scan(cwd, base, head, pending)`：**risk_scan 内有三处** `origin/main..origin/dev`（collect.py:238 diff、:247 multi_author log、:263 Revert 直接提交扫描），**全部三处**换成统一变量——函数体首行加 `rng = "%s..%s" % (base, head)`，三处 range 实参改用 `rng`。⚠️ 漏改 :263（Revert 扫描）会让小招/recruit-api 线用错 main..dev 范围混入错误 revert（Codex round-3 MAJOR）。六维新增字段在 Task 3。
 
 `reverse_commits` 重写（三分类，只 hotfix 带 files）：
 ```python
@@ -208,7 +208,7 @@ def collect_line(label, path, base, head, now):
 **Interfaces produced:**
 - `parse_force_pushes(json_text)` → `[{actor, before, after, timestamp}]`（纯，可测）
 - `repo_slug(cwd)` → `"owner/repo"`（副作用：`gh repo view`）
-- `branch_audit(cwd, base)` → `{"force_pushes": [...]}`（副作用：`gh api activity`）
+- `branch_audit(cwd, base, now)` → `{"force_pushes": [{actor,before,after,timestamp,days_ago}]}`（副作用：`gh api activity`；`days_ago` 供 SPEC 过滤旧事件）
 
 **API 契约（已本地实测 TierIITech/nine-recruit-api，2026-07-16）：**
 `gh api --paginate "repos/{slug}/activity?ref=refs/heads/{branch}&activity_type=force_push&per_page=100"` → JSON 数组，每项含 `activity_type`/`actor.login`/`timestamp`/`before`/`after`。**`--paginate` 自动跟 Link header 翻完所有页，彻底消除滑窗漏报**（回应 HANDOFF「翻多页防滑窗」）；因服务端 `activity_type=force_push` 过滤后事件极稀（实测该仓史上仅 4 次），翻页成本可忽略。fail-fast：`gh api` 非零退出即 `GhError`。
@@ -253,13 +253,17 @@ def parse_force_pushes(json_text):
 def repo_slug(cwd):
     return gh_json(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd)
 
-def branch_audit(cwd, base):
+def branch_audit(cwd, base, now):
     slug = repo_slug(cwd)
     ref = "refs/heads/" + remote_branch(base)
     j = gh_json(["gh", "api", "--paginate",
                  "repos/%s/activity?ref=%s&activity_type=force_push&per_page=100" % (slug, ref)], cwd)
-    return {"force_pushes": parse_force_pushes(j)}
+    fps = parse_force_pushes(j)
+    for fp in fps:
+        fp["days_ago"] = compute_days_stale(fp["timestamp"], now) if fp["timestamp"] else None
+    return {"force_pushes": fps}
 ```
+> **days_ago（Codex round-3 MAJOR）**：force_pushes 全量返回，但每条附 `days_ago`（复用 `compute_days_stale`）。SPEC §二规定：**force-push 告警只报 `days_ago <= 14` 的**，更早的历史强推不进每日简报——否则老 force-push 每天重复刷屏。
 
 - [ ] **Step 3b: 写 branch_audit fail-fast 测试（MINOR→触及 fail-fast Global Constraint，纳入修复）**
 ```python
@@ -269,12 +273,12 @@ def test_branch_audit_fail_fast(monkeypatch):
         return R()
     monkeypatch.setattr(collect.subprocess, "run", boom)
     with pytest.raises(collect.GhError):
-        collect.branch_audit("/x", "origin/main")
+        collect.branch_audit("/x", "origin/main", datetime(2026, 7, 16, tzinfo=timezone.utc))
 ```
 
 - [ ] **Step 4: 接入 collect_line** —— 在 Task 1 的 `collect_line` return dict 加一行：
 ```python
-            "branch_audit": branch_audit(path, base),
+            "branch_audit": branch_audit(path, base, now),
 ```
 
 - [ ] **Step 5: 跑测试确认 GREEN** — `python3 -m pytest test_collect.py -v` → 28 passed（25 + 3：parse_force_pushes / empty / fail_fast）
@@ -293,10 +297,10 @@ def test_risk_scan_six_dim(monkeypatch):
     pending = [{"pr": "1", "subject": "feat", "subjects": ["WIP: 调试", "feat: 正常"],
                 "insertions": 10, "deletions": 5, "merge_hash": "m1"}]
     def fake_sh(args, cwd):
-        if "diff" in args and "--name-only" in args and "origin/main..origin/dev" in args:
+        if "diff" in args and "--name-only" in args:
             return "db/migrations/001_drop.sql\ndeploy/docker-compose.prod.yml\nsrc/app.py"
-        if "show" in args and args[-1] == "origin/dev:db/migrations/001_drop.sql":
-            return "ALTER TABLE users DROP COLUMN nick;"
+        if "diff" in args and "db/migrations/001_drop.sql" in args:   # 单文件 diff
+            return "+ALTER TABLE users DROP COLUMN nick;\n- 旧行"
         if "log" in args:   # multi_author 扫描
             return ""
         return ""
@@ -316,15 +320,16 @@ def test_risk_scan_six_dim(monkeypatch):
     config = sorted({f for f in files if is_config_file(f)})
     irreversible = []
     for f in schema:
-        try:
-            content = sh(["git", "show", "%s:%s" % (head, f)], cwd)
-        except GitError:
-            continue   # head 上文件已删/取不到 → 跳过(客观信号缺失,不 fail 整仓)
-        if is_irreversible_migration(content):
+        # 用 git diff 扫**加行**(而非 git show 全文):diff 对 diff 内文件永不失败 → 无 try/except → fail-fast 完整。
+        diff = sh(["git", "-c", "core.quotepath=false", "diff", rng, "--", f], cwd)
+        added = "\n".join(ln[1:] for ln in diff.splitlines()
+                          if ln.startswith("+") and not ln.startswith("+++"))
+        if is_irreversible_migration(added):
             irreversible.append(f)
     wip = [{"pr": p["pr"], "subjects": [s for s in p["subjects"] if has_wip_marker([s])]}
            for p in pending if has_wip_marker(p["subjects"])]
 ```
+> **fail-fast 修复（Codex round-3 CRITICAL）**：原 `git show head:file` + `except GitError: continue` 会吞掉读取失败、漏报不可逆迁移。改用 `git diff rng -- f`——文件必在 diff 内故永不失败，删掉 try/except，git 任何异常仍整体 fail-fast。`rng` 复用 MAJOR1 修复引入的 `rng = "%s..%s" % (base, head)`。扫加行（`+` 开头、排除 `+++` 头）比全文更准：只看本次**新增**的破坏性 DDL。
 并把 `return` dict 扩为：
 ```python
     return {"schema_changes": schema, "big_prs": big,
@@ -342,6 +347,11 @@ def test_risk_scan_six_dim(monkeypatch):
 **Files:** Modify `collect.py` `main()` · `SPEC.md` · Test `test_collect.py`
 
 - [ ] **Step 1: 写失败测试 —— main 组装 lines[]（v2）**
+
+**先在 test_collect.py 头部补 import**（现有仅 `datetime/pytest/collect`，本测试用到 `sys`/`json`，否则 NameError —— Codex round-3 MINOR）：
+```python
+import sys, json
+```
 ```python
 def test_main_pair_assembles_lines(monkeypatch, capsys):
     monkeypatch.setattr(collect, "collect_line",
@@ -387,6 +397,12 @@ def main():
 - [ ] **Step 5: SPEC.md 升级 v1→v2**（内容源 = 本 worktree 已committed 的 `HANDOFF.md`「呈现设计」段，照搬其五段结构 + 六维图例）：
   - §一 数据契约：`devmain-digest/v1` `repos[]` → `v2` `lines[]`；字段表加 `line/base/head/base_stale_days/base_ahead_dev`、`branch_audit.force_pushes[]`、`reverse_commits.{release_merges,other_pr_merges,real_hotfixes}`（强调 **real_hotfixes 只含非 merge 直接提交**）、`risk.{config_changes,irreversible_migrations,wip_prs}`。
   - §二 归纳指令：改为**三条发布线各一块**，块内固定五段（结论→⚠️异常告警[六维标签]→⚠️发布风险[逐条归人]→📦大改动按主线→⏳待合入PR），标题 `📋 今日生产发布建议 · M-D` + 六维图例行 + 末尾六维体检小结。保留"禁造词/说人话/中文为主"。
+  - **§二 必须写明确定性告警阈值（Codex round-3 MAJOR：无阈值则每日严重度漂移）**——异常告警按下列固定规则判，不靠 LLM 自由裁量：
+    - 🔴 **疑似回滚**：`branch_audit.force_pushes` 中存在 `days_ago <= 14` 的 force-push（旧的不报）。
+    - 📉 **发布积压**：`dev_ahead_base > 100`（提交数超阈值）。
+    - 📉 **base 久未更新**：`base_stale_days > 14`。
+    - ⚠️ **未回流 hotfix**：`reverse_commits.real_hotfixes` 非空（这才是"发前必须对齐"的真信号；`release_merges`/`other_pr_merges` 只做计数不告警）。
+    - 全部不触发 → 一行绿字"分支健康"。
   - §三 已知局限：加"force_pushes per_page=100 上限（force-push 事件极稀，实际无漏）"、"irreversible 仅扫 schema 文件全文（非 schema 文件里的裸 SQL 不查）"。
 
 - [ ] **Step 6: Commit** — `git commit -am "feat(devmain-brief): main --pair + digest v2 + SPEC 三线六维"`
@@ -423,5 +439,6 @@ def main():
 - branch_audit API（`activity?activity_type=force_push`）实测返 #707 force-push，字段 actor/timestamp/before/after 对得上；`--paginate` 实测拼接多页为单数组 ✓
 
 **测试基线锚点**：22 passed（commit 7cd29c4）。每 Task 后总数应为 25→28→29→30。
-**Round-1 critic 修复记录**：CRITICAL(fetch 测试签名+计数) + MAJOR(force-push 改 --paginate) + MINOR×2(branch_audit fail-fast 测试 / docstring --repo→--pair) 已全部并入上述 Task。
+**Round-1 Claude critic 修复**：CRITICAL(fetch 测试签名+计数) + MAJOR(force-push 改 --paginate) + MINOR×2(branch_audit fail-fast 测试 / docstring --repo→--pair)。
+**Round-3 Codex 修复**：CRITICAL(不可逆迁移弃 git show+try/except 改 git diff 扫加行,fail-fast 完整) + MAJOR×3(risk_scan 三处 range 用 rng 统一 / force-push 加 days_ago + SPEC 14 天窗 / SPEC 补确定性阈值 疑似回滚·积压·久未更新·未回流hotfix) + MINOR×2(test 补 import sys,json / plan:7 措辞纠正 parse_force_pushes 属 Task2 新增)。均已并入并本地实证(diff 扫加行 DROP→True/ADD→False)。
 
