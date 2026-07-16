@@ -130,6 +130,10 @@ def parse_pair_arg(spec):
         raise ValueError("pair 格式应为 label=path:base..head,得到:%r" % spec)
     if not (label and path and base and head):
         raise ValueError("pair 各字段不能为空:%r" % spec)
+    # base/head 必须是 remote-tracking ref(origin/*):fetch 刷新的是 refs/remotes/origin/*,
+    # 若传裸分支名 rev-list/log 会读本地旧分支 → 成功但静默旧数据(fail-fast 之外的隐性坑)。
+    if not (base.startswith("origin/") and head.startswith("origin/")):
+        raise ValueError("base/head 必须以 origin/ 开头(remote-tracking ref):%r" % spec)
     return label, path, base, head
 
 

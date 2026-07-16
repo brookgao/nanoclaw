@@ -162,6 +162,8 @@ def test_parse_pair_arg():
         ("小招", "/p/nine", "origin/recruit-agent/prod", "origin/recruit-agent/dev")
     with pytest.raises(ValueError):
         collect.parse_pair_arg("bad-no-range")
+    with pytest.raises(ValueError):
+        collect.parse_pair_arg("nine=/p:main..dev")  # 非 origin/ 前缀 → 拒绝(防读本地旧分支)
 
 
 def test_classify_reverse():
@@ -240,6 +242,20 @@ def test_branch_audit_fail_fast(monkeypatch):
     monkeypatch.setattr(collect.subprocess, "run", boom)
     with pytest.raises(collect.GhError):
         collect.branch_audit("/x", "origin/main", datetime(2026, 7, 16, tzinfo=timezone.utc))
+
+
+def test_branch_audit_success(monkeypatch):
+    def fake_gh_json(args, cwd):
+        if "repo" in args:
+            return "TierIITech/nine-recruit-api"
+        return json.dumps([{"activity_type": "force_push", "actor": {"login": "zyue0956-bit"},
+                            "timestamp": "2026-07-10T00:00:00Z", "before": "aaaaaaaaZ", "after": "bbbbbbbbZ"}])
+    monkeypatch.setattr(collect, "gh_json", fake_gh_json)
+    r = collect.branch_audit("/x", "origin/main", datetime(2026, 7, 16, tzinfo=timezone.utc))
+    assert len(r["force_pushes"]) == 1
+    assert r["force_pushes"][0]["actor"] == "zyue0956-bit"
+    assert r["force_pushes"][0]["before"] == "aaaaaaaa"   # short 8
+    assert r["force_pushes"][0]["days_ago"] == 6           # 07-10 → 07-16
 
 
 # --- 六维风险扩展(Task 3)---
