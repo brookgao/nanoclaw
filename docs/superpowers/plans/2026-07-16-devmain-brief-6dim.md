@@ -123,6 +123,12 @@ def test_remote_branch():
     assert collect.remote_branch("dev") == "dev"
 ```
 
+**⚠️ 同步更新现有 fetch 测试（签名 `fetch(cwd)`→`fetch(cwd,base,head)`，否则 TypeError）** —— test_collect.py:87 / :95 两处 `collect.fetch("/tmp/whatever")` 改为：
+```python
+    collect.fetch("/tmp/whatever", "origin/main", "origin/dev")
+```
+（这是**更新**不是新增；改后 22 个现有测试仍全绿，故 Task 1 后总数 = 22 + 3 新 = 25。）
+
 - [ ] **Step 2: 跑测试确认 RED** — `python3 -m pytest test_collect.py -k "reverse_commits or remote_branch" -v` → FAIL（`remote_branch` 未定义 / `reverse_commits` 签名不符）
 
 - [ ] **Step 3: 实现** —— collect.py 改动：
@@ -205,7 +211,8 @@ def collect_line(label, path, base, head, now):
 - `branch_audit(cwd, base)` → `{"force_pushes": [...]}`（副作用：`gh api activity`）
 
 **API 契约（已本地实测 TierIITech/nine-recruit-api，2026-07-16）：**
-`gh api "repos/{slug}/activity?ref=refs/heads/{branch}&activity_type=force_push&per_page=100"` → JSON 数组，每项含 `activity_type`/`actor.login`/`timestamp`/`before`/`after`。服务端 `activity_type=force_push` 过滤保证只返 force-push，per_page=100 覆盖整史（无滑窗漏报）。fail-fast：`gh api` 非零退出即 `GhError`。
+`gh api --paginate "repos/{slug}/activity?ref=refs/heads/{branch}&activity_type=force_push&per_page=100"` → JSON 数组，每项含 `activity_type`/`actor.login`/`timestamp`/`before`/`after`。**`--paginate` 自动跟 Link header 翻完所有页，彻底消除滑窗漏报**（回应 HANDOFF「翻多页防滑窗」）；因服务端 `activity_type=force_push` 过滤后事件极稀（实测该仓史上仅 4 次），翻页成本可忽略。fail-fast：`gh api` 非零退出即 `GhError`。
+> 注：`gh api --paginate` 对 JSON 数组响应会**拼接**各页数组为单一数组（gh 已知行为），`json.loads` 正常解析。
 
 - [ ] **Step 1: 写失败测试 —— parse_force_pushes（纯）**
 ```python
@@ -249,9 +256,20 @@ def repo_slug(cwd):
 def branch_audit(cwd, base):
     slug = repo_slug(cwd)
     ref = "refs/heads/" + remote_branch(base)
-    j = gh_json(["gh", "api",
+    j = gh_json(["gh", "api", "--paginate",
                  "repos/%s/activity?ref=%s&activity_type=force_push&per_page=100" % (slug, ref)], cwd)
     return {"force_pushes": parse_force_pushes(j)}
+```
+
+- [ ] **Step 3b: 写 branch_audit fail-fast 测试（MINOR→触及 fail-fast Global Constraint，纳入修复）**
+```python
+def test_branch_audit_fail_fast(monkeypatch):
+    def boom(args, cwd=None, capture_output=None, text=None):
+        class R: returncode = 1; stdout = ""; stderr = "gh: not found"
+        return R()
+    monkeypatch.setattr(collect.subprocess, "run", boom)
+    with pytest.raises(collect.GhError):
+        collect.branch_audit("/x", "origin/main")
 ```
 
 - [ ] **Step 4: 接入 collect_line** —— 在 Task 1 的 `collect_line` return dict 加一行：
@@ -259,7 +277,7 @@ def branch_audit(cwd, base):
             "branch_audit": branch_audit(path, base),
 ```
 
-- [ ] **Step 5: 跑测试确认 GREEN** — `python3 -m pytest test_collect.py -v` → 27 passed（25 + 2）
+- [ ] **Step 5: 跑测试确认 GREEN** — `python3 -m pytest test_collect.py -v` → 28 passed（25 + 3：parse_force_pushes / empty / fail_fast）
 - [ ] **Step 6: Commit** — `git commit -am "feat(devmain-brief): branch_audit force-push 审计(GitHub activity API)"`
 
 
@@ -315,7 +333,7 @@ def test_risk_scan_six_dim(monkeypatch):
 ```
 > 注：`is_irreversible_migration` 对 `git show head:file` 的**全文**扫描；`irreversible` 的 `try/except GitError` 是唯一允许的"跳过单文件"——文件取不到是客观信号缺失，非任务失败（不违反 fail-fast：fetch/gh 仍整体 fail-fast，这里只是单个 schema 文件内容不可得时不误报）。
 
-- [ ] **Step 4: 跑测试确认 GREEN** — `python3 -m pytest test_collect.py -v` → 28 passed（27 + 1）
+- [ ] **Step 4: 跑测试确认 GREEN** — `python3 -m pytest test_collect.py -v` → 29 passed（28 + 1）
 - [ ] **Step 5: Commit** — `git commit -am "feat(devmain-brief): risk_scan 六维扩展(不可逆迁移/配置/WIP)"`
 
 
@@ -362,7 +380,9 @@ def main():
 ```
 并更新文件头 docstring 用法行为 `--pair label=path:base..head`。
 
-- [ ] **Step 4: 跑测试确认 GREEN** — `python3 -m pytest test_collect.py -v` → 29 passed
+- [ ] **Step 4: 跑测试确认 GREEN** — `python3 -m pytest test_collect.py -v` → 30 passed
+
+并同步 collect.py 头部 docstring 用法行 + `main()` 内 `--repo` 相关注释 → 全部改为 `--pair`（MINOR：残留 `--repo` 描述会误导）。
 
 - [ ] **Step 5: SPEC.md 升级 v1→v2**（内容源 = 本 worktree 已committed 的 `HANDOFF.md`「呈现设计」段，照搬其五段结构 + 六维图例）：
   - §一 数据契约：`devmain-digest/v1` `repos[]` → `v2` `lines[]`；字段表加 `line/base/head/base_stale_days/base_ahead_dev`、`branch_audit.force_pushes[]`、`reverse_commits.{release_merges,other_pr_merges,real_hotfixes}`（强调 **real_hotfixes 只含非 merge 直接提交**）、`risk.{config_changes,irreversible_migrations,wip_prs}`。
@@ -399,8 +419,9 @@ def main():
 **4. 本地实证**（2026-07-16 已跑，见 plan 编写记录）：
 - classify_reverse 三分类 + 小招嵌套分支名 → 实测输出与 Task1 测试断言字面一致 ✓
 - parse_pair_arg 小招 refspec → 四元组正确 ✓
-- 基线 `pytest` = 22 passed → 增量预期 25/27/28/29 = 22+3+2+1+1 算术自洽 ✓
-- branch_audit API（`activity?activity_type=force_push`）实测返 #707 force-push，字段 actor/timestamp/before/after 对得上 ✓
+- 基线 `pytest` = 22 passed；Task1 **更新** 2 个 fetch 测试（非新增）+ 新增 3 → 25；Task2 +3（parse_force_pushes/empty/fail_fast）→ 28；Task3 +1 → 29；Task4 +1 → 30。算术自洽 ✓
+- branch_audit API（`activity?activity_type=force_push`）实测返 #707 force-push，字段 actor/timestamp/before/after 对得上；`--paginate` 实测拼接多页为单数组 ✓
 
-**测试基线锚点**：22 passed（commit 7cd29c4）。每 Task 后总数应为 25→27→28→29。
+**测试基线锚点**：22 passed（commit 7cd29c4）。每 Task 后总数应为 25→28→29→30。
+**Round-1 critic 修复记录**：CRITICAL(fetch 测试签名+计数) + MAJOR(force-push 改 --paginate) + MINOR×2(branch_audit fail-fast 测试 / docstring --repo→--pair) 已全部并入上述 Task。
 
