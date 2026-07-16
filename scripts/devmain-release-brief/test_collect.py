@@ -256,6 +256,43 @@ def test_branch_audit_fail_fast(monkeypatch):
         collect.branch_audit("/x", "origin/main", datetime(2026, 7, 16, tzinfo=timezone.utc))
 
 
+def test_last_merge(monkeypatch):
+    monkeypatch.setattr(collect, "sh", lambda a, c:
+        "2026-07-15T07:56:00+08:00\x01Merge pull request #4170 from TierIITech/fix/x")
+    r = collect.last_merge("/x", "origin/main")
+    assert r["date"] == "2026-07-15T07:56:00+08:00"
+    assert "#4170" in r["subject"]
+
+
+def test_last_merge_none(monkeypatch):
+    monkeypatch.setattr(collect, "sh", lambda a, c: "")   # 无 merge 提交
+    assert collect.last_merge("/x", "origin/main") == {"date": "", "subject": ""}
+
+
+def test_build_card_structure():
+    import build_card
+    data = {"generated_at": "03:49", "heads": "nine x / api y",
+            "summary": "总检一句",
+            "lines": [{"repo": "nine（主平台）", "branch": "dev → main",
+                       "last_release_label": "上次合 main", "last_release": "07-15 07:56（#4170）",
+                       "conclusion": "建议发",
+                       "sections": [
+                           {"n": 1, "title": "异常告警", "safe": False, "body": "· ⚠️ 有事"},
+                           {"n": 2, "title": "发布风险", "safe": True, "body": "无风险项"}]}]}
+    card = build_card.build_card(data, "标题")
+    assert card["header"]["title"]["content"] == "标题"
+    assert "schema" not in card                    # 卡片 1.0，不用 2.0
+    md = [e["content"] for e in card["elements"] if e.get("tag") == "markdown"]
+    # 仓名 heading-3
+    assert any(e.get("text_size") == "heading-3" and "【仓库】nine" in e["content"] for e in card["elements"])
+    # 基本信息块含 分支/上次合 main/结论 三个加粗标签，且在同一元素
+    assert any("**分支：**" in c and "**上次合 main：**" in c and "**结论：**" in c for c in md)
+    # 安全节标题挂 ✅，且标题与正文在同一元素（\n 相连）
+    assert any(c.startswith("**2. 发布风险** ✅\n无风险项") for c in md)
+    # 告警节标题不挂 ✅
+    assert any(c.startswith("**1. 异常告警**\n· ⚠️ 有事") for c in md)
+
+
 def test_branch_audit_success(monkeypatch):
     def fake_gh_json(args, cwd):
         if "repo" in args:

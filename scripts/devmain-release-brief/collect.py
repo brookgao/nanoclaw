@@ -226,6 +226,16 @@ def head_sha(cwd, head):
     return sh(["git", "rev-parse", "--short", head], cwd)
 
 
+def last_merge(cwd, base):
+    # base 分支上一次 merge 提交(≈上次发布/合主分支)的时间+subject,给简报基本信息展示。
+    # 无 merge 提交时返回空(git log -1 --merges 正常成功、空 stdout)。
+    out = sh(["git", "log", "-1", "--merges", "--format=%cI%x01%s", base], cwd)
+    if "\x01" not in out:
+        return {"date": "", "subject": ""}
+    d, s = out.split("\x01", 1)
+    return {"date": d, "subject": s}
+
+
 def repo_slug(cwd):
     return gh_json(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd)
 
@@ -363,6 +373,7 @@ def collect_line(label, path, base, head, now):
             "dev_ahead_base": int(sh(["git", "rev-list", "--count", "%s..%s" % (base, head)], path) or 0),
             "base_ahead_dev": int(sh(["git", "rev-list", "--count", "%s..%s" % (head, base)], path) or 0),
             "base_stale_days": compute_days_stale(sh(["git", "log", "-1", "--format=%cI", base], path), now),
+            "base_last_merge": last_merge(path, base),
             "pending_merged_prs": pending,
             "reverse_commits": reverse_commits(path, base, head, hb),
             "open_prs_targeting_dev": open_prs(path, head, now),
