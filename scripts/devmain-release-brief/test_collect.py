@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """dev->main 采集器 · 纯解析层 + fail-fast 的 fixture 测试。"""
 from datetime import datetime, timezone
+import sys, json
 import pytest
 import collect
 
@@ -84,7 +85,7 @@ def test_fetch_raises_on_nonzero(monkeypatch):
         stderr = "fatal: could not read from remote"
     monkeypatch.setattr(collect.subprocess, "run", lambda *a, **k: R())
     with pytest.raises(collect.FetchError):
-        collect.fetch("/tmp/whatever")
+        collect.fetch("/tmp/whatever", "origin/main", "origin/dev")
 
 
 def test_fetch_ok_on_zero(monkeypatch):
@@ -92,7 +93,7 @@ def test_fetch_ok_on_zero(monkeypatch):
         returncode = 0
         stderr = ""
     monkeypatch.setattr(collect.subprocess, "run", lambda *a, **k: R())
-    collect.fetch("/tmp/whatever")  # 不抛即通过
+    collect.fetch("/tmp/whatever", "origin/main", "origin/dev")  # 不抛即通过
 
 
 def test_gh_json_raises_on_nonzero(monkeypatch):
@@ -169,3 +170,111 @@ def test_classify_reverse():
         "Merge pull request #2 from TierIITech/recruit-agent/dev", "recruit-agent/dev") == "release"
     assert collect.classify_reverse("Merge pull request #3 from TierIITech/feat/x", "dev") == "other_pr"
     assert collect.classify_reverse("fix: 直接改 base 的 hotfix", "dev") == "hotfix"
+
+
+# --- 编排层:分支对参数化 + reverse 三分类(Task 1)---
+
+def test_remote_branch():
+    assert collect.remote_branch("origin/dev") == "dev"
+    assert collect.remote_branch("origin/recruit-agent/dev") == "recruit-agent/dev"
+    assert collect.remote_branch("dev") == "dev"
+
+
+def test_reverse_commits_three_way(monkeypatch):
+    log_out = "\n".join([
+        "h1\x01alice\x012026-07-01T00:00:00Z\x01Merge pull request #1 from TierIITech/dev",
+        "h2\x01bob\x012026-07-02T00:00:00Z\x01Merge pull request #2 from TierIITech/feat/x",
+        "h3\x01carol\x012026-07-03T00:00:00Z\x01fix: 直接 hotfix prod redis",
+    ])
+    def fake_sh(args, cwd):
+        if "--name-only" in args:
+            return "svc/redis.py"
+        return log_out
+    monkeypatch.setattr(collect, "sh", fake_sh)
+    r = collect.reverse_commits("/x", "origin/main", "origin/dev", "dev")
+    assert len(r["release_merges"]) == 1
+    assert len(r["other_pr_merges"]) == 1
+    assert len(r["real_hotfixes"]) == 1
+    assert r["real_hotfixes"][0]["files"] == ["svc/redis.py"]
+    assert "files" not in r["release_merges"][0]
+
+
+def test_reverse_commits_recruit_agent_no_false_positive(monkeypatch):
+    log_out = "\n".join(
+        "h%d\x01u\x012026-07-01T00:00:00Z\x01Merge pull request #%d from TierIITech/feat/x%d" % (i, i, i)
+        for i in range(46))
+    monkeypatch.setattr(collect, "sh", lambda a, c: log_out)
+    r = collect.reverse_commits("/x", "origin/recruit-agent/prod", "origin/recruit-agent/dev", "recruit-agent/dev")
+    assert len(r["real_hotfixes"]) == 0
+    assert len(r["other_pr_merges"]) == 46
+
+
+# --- branch_audit / force-push 审计(Task 2)---
+
+def test_parse_force_pushes():
+    j = json.dumps([
+        {"activity_type": "force_push", "actor": {"login": "zyue0956-bit"},
+         "timestamp": "2026-07-10T13:56:21Z", "before": "535985ca6xxx", "after": "316ccf556xxx"},
+        {"activity_type": "push", "actor": {"login": "someone"},
+         "timestamp": "2026-07-09T00:00:00Z", "before": "aaa", "after": "bbb"},
+    ])
+    r = collect.parse_force_pushes(j)
+    assert len(r) == 1
+    assert r[0]["actor"] == "zyue0956-bit"
+    assert r[0]["before"] == "535985ca"
+    assert r[0]["after"] == "316ccf55"
+    assert r[0]["timestamp"] == "2026-07-10T13:56:21Z"
+
+
+def test_parse_force_pushes_empty():
+    assert collect.parse_force_pushes("[]") == []
+
+
+def test_branch_audit_fail_fast(monkeypatch):
+    def boom(args, cwd=None, capture_output=None, text=None):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: not found"
+        return R()
+    monkeypatch.setattr(collect.subprocess, "run", boom)
+    with pytest.raises(collect.GhError):
+        collect.branch_audit("/x", "origin/main", datetime(2026, 7, 16, tzinfo=timezone.utc))
+
+
+# --- 六维风险扩展(Task 3)---
+
+def test_risk_scan_six_dim(monkeypatch):
+    pending = [{"pr": "1", "subject": "feat", "subjects": ["WIP: 调试", "feat: 正常"],
+                "insertions": 10, "deletions": 5, "merge_hash": "m1"}]
+    def fake_sh(args, cwd):
+        if "diff" in args and "--name-only" in args:
+            return "db/migrations/001_drop.sql\ndeploy/docker-compose.prod.yml\nsrc/app.py"
+        if "diff" in args and "db/migrations/001_drop.sql" in args:
+            return "+ALTER TABLE users DROP COLUMN nick;\n- 旧行"
+        if "log" in args:
+            return ""
+        return ""
+    monkeypatch.setattr(collect, "sh", fake_sh)
+    r = collect.risk_scan("/x", "origin/main", "origin/dev", pending)
+    assert r["config_changes"] == ["deploy/docker-compose.prod.yml"]
+    assert r["irreversible_migrations"] == ["db/migrations/001_drop.sql"]
+    assert len(r["wip_prs"]) == 1
+    assert r["wip_prs"][0]["pr"] == "1"
+    assert r["wip_prs"][0]["subjects"] == ["WIP: 调试"]
+
+
+# --- main --pair + v2 lines[](Task 4)---
+
+def test_main_pair_assembles_lines(monkeypatch, capsys):
+    monkeypatch.setattr(collect, "collect_line",
+        lambda label, path, base, head, now: {"line": label, "base": base, "head": head})
+    monkeypatch.setattr(sys, "argv", ["collect.py",
+        "--pair", "nine=/p:origin/main..origin/dev",
+        "--pair", "小招=/p:origin/recruit-agent/prod..origin/recruit-agent/dev"])
+    collect.main()
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["schema"] == "devmain-digest/v2"
+    assert len(doc["lines"]) == 2
+    assert doc["lines"][0]["line"] == "nine"
+    assert doc["lines"][1]["base"] == "origin/recruit-agent/prod"

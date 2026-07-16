@@ -4,9 +4,11 @@
 依赖: git, gh(已登录);仅用 python 标准库。
 
 用法:
-  python3 collect.py --repo nine=/path/nine --repo nine-recruit-api=/path/api --out out.json
+  python3 collect.py --pair nine=/path/nine:origin/main..origin/dev \
+                     --pair 小招Agent=/path/nine:origin/recruit-agent/prod..origin/recruit-agent/dev \
+                     --pair nine-recruit-api=/path/api:origin/main..origin/dev --out out.json
 
-失败即非零退出(fail-fast):任一仓 git fetch / gh / 其它 git 命令失败 → 抛错 → 退出码非零。
+失败即非零退出(fail-fast):任一线 git fetch / gh / 其它 git 命令失败 → 抛错 → 退出码非零。
 """
 import argparse, json, re, subprocess, sys
 from datetime import datetime, timezone
@@ -140,6 +142,24 @@ def classify_reverse(subject, head_branch):
     return "hotfix"
 
 
+def remote_branch(ref):
+    # "origin/recruit-agent/dev" → "recruit-agent/dev";无 origin/ 前缀原样返回
+    return ref[len("origin/"):] if ref.startswith("origin/") else ref
+
+
+def parse_force_pushes(json_text):
+    # gh activity API 已服务端过滤 activity_type=force_push;此处防御性再过滤。days_ago 由 branch_audit 补。
+    out = []
+    for a in json.loads(json_text or "[]"):
+        if a.get("activity_type") != "force_push":
+            continue
+        out.append({"actor": (a.get("actor") or {}).get("login", "?"),
+                    "before": (a.get("before") or "")[:8],
+                    "after": (a.get("after") or "")[:8],
+                    "timestamp": a.get("timestamp", "")})
+    return out
+
+
 def parse_authors_subjects(text):
     # 解析 "git log --format=%an\x01%s" 输出 → (去重作者原序, subject 列表)
     authors, seen, subjects = [], set(), []
@@ -167,8 +187,13 @@ def sh(args, cwd):
     return r.stdout.strip()
 
 
-def fetch(cwd):
-    r = subprocess.run(["git", "fetch", "origin", "main", "dev", "--quiet"],
+def fetch(cwd, base, head):
+    rb, rh = remote_branch(base), remote_branch(head)
+    # 显式 refspec:保证 refs/remotes/origin/* 被刷新。裸 `git fetch origin <br>` 可能只更
+    # FETCH_HEAD 不动 remote-tracking → 后续 origin/base..origin/head 用旧数据(成功但静默错)。
+    r = subprocess.run(["git", "fetch", "origin",
+                        "+%s:refs/remotes/origin/%s" % (rb, rb),
+                        "+%s:refs/remotes/origin/%s" % (rh, rh), "--quiet"],
                        cwd=cwd, capture_output=True, text=True)
     if r.returncode != 0:
         raise FetchError("git fetch failed in %s: %s" % (cwd, (r.stderr or "").strip()))
@@ -181,14 +206,29 @@ def gh_json(args, cwd):
     return r.stdout.strip()
 
 
-def dev_head(cwd):
-    return sh(["git", "rev-parse", "--short", "origin/dev"], cwd)
+def head_sha(cwd, head):
+    return sh(["git", "rev-parse", "--short", head], cwd)
+
+
+def repo_slug(cwd):
+    return gh_json(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd)
+
+
+def branch_audit(cwd, base, now):
+    slug = repo_slug(cwd)
+    ref = "refs/heads/" + remote_branch(base)
+    j = gh_json(["gh", "api", "--paginate",
+                 "repos/%s/activity?ref=%s&activity_type=force_push&per_page=100" % (slug, ref)], cwd)
+    fps = parse_force_pushes(j)
+    for fp in fps:
+        fp["days_ago"] = compute_days_stale(fp["timestamp"], now) if fp["timestamp"] else None
+    return {"force_pushes": fps}
 
 
 # --- 编排层 ---
 
-def pending_prs(cwd):
-    out = sh(["git", "log", "origin/main..origin/dev", "--merges",
+def pending_prs(cwd, base, head):
+    out = sh(["git", "log", "%s..%s" % (base, head), "--merges",
               "--format=%H%x01%an%x01%cI%x01%s"], cwd)
     prs = []
     for line in filter(None, out.splitlines()):
@@ -208,23 +248,27 @@ def pending_prs(cwd):
     return prs
 
 
-def reverse_commits(cwd):
-    out = sh(["git", "log", "origin/dev..origin/main",
+def reverse_commits(cwd, base, head, head_branch):
+    out = sh(["git", "log", "%s..%s" % (head, base),
               "--format=%H%x01%an%x01%cI%x01%s"], cwd)
-    harmless, hotfix = [], []
+    release, other_pr, hotfix = [], [], []
     for line in filter(None, out.splitlines()):
         h, an, ci, s = line.split("\x01")
         rec = {"hash": h[:9], "author": an, "date": ci, "subject": s}
-        if re.match(r"Merge pull request #\d+ from \S+?/dev$", s):
-            harmless.append(rec)
+        cls = classify_reverse(s, head_branch)
+        if cls == "release":
+            release.append(rec)
+        elif cls == "other_pr":
+            other_pr.append(rec)
         else:
+            # 仅真 hotfix(非 merge 直接提交)取 files 并告警;release/other_pr 只计数,防误报。
             rec["files"] = [f for f in sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", h + "^1", h], cwd).splitlines() if f]
             hotfix.append(rec)
-    return {"harmless_release_merges": harmless, "real_hotfixes": hotfix}
+    return {"release_merges": release, "other_pr_merges": other_pr, "real_hotfixes": hotfix}
 
 
-def open_prs(cwd, now):
-    j = gh_json(["gh", "pr", "list", "--base", "dev", "--state", "open",
+def open_prs(cwd, head, now):
+    j = gh_json(["gh", "pr", "list", "--base", remote_branch(head), "--state", "open",
                  "--json", "number,title,author,isDraft,updatedAt", "--limit", "100"], cwd)
     res = []
     for p in json.loads(j or "[]"):
@@ -234,8 +278,9 @@ def open_prs(cwd, now):
     return sorted(res, key=lambda x: x["days_stale"])
 
 
-def risk_scan(cwd, pending):
-    files = sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", "origin/main..origin/dev"], cwd).splitlines()
+def risk_scan(cwd, base, head, pending):
+    rng = "%s..%s" % (base, head)
+    files = sh(["git", "-c", "core.quotepath=false", "diff", "--name-only", rng], cwd).splitlines()
     schema = sorted({f for f in files if is_schema_file(f)})
     big = []
     for p in pending:
@@ -244,7 +289,7 @@ def risk_scan(cwd, pending):
             big.append({"pr": p["pr"], "subject": p["subject"], "files_changed": p["files_changed"],
                         "churn": p["insertions"] + p["deletions"],
                         "files": [f for f in fl if f][:25], "merge_hash": p["merge_hash"]})
-    log = sh(["git", "-c", "core.quotepath=false", "log", "origin/main..origin/dev", "--no-merges",
+    log = sh(["git", "-c", "core.quotepath=false", "log", rng, "--no-merges",
               "--format=%x02%an", "--name-only"], cwd)
     cur, fa = None, {}
     for ln in log.splitlines():
@@ -260,34 +305,55 @@ def risk_scan(cwd, pending):
     # 局限:PR 标题写 revert 但分支非 revert-* 且无 Revert 提交的极端情形会漏(真 PR 标题需 gh pr view 逐个取,107 PR 太贵,不做;归纳层不确定可 gh 深挖)。
     reverted = [{"pr": p["pr"], "subject": p["subject"], "kind": "merge-pr"} for p in pending
                 if re.search(r"revert", p["subject"], re.I)]
-    for s in sh(["git", "log", "origin/main..origin/dev", "--no-merges", "--format=%s"], cwd).splitlines():
+    for s in sh(["git", "log", rng, "--no-merges", "--format=%s"], cwd).splitlines():
         if re.match(r'^Revert ', s):
             reverted.append({"pr": None, "subject": s, "kind": "commit"})
+    # 六维扩展:④配置变动 / ③⑤不可逆迁移 / ①WIP
+    config = sorted({f for f in files if is_config_file(f)})
+    irreversible = []
+    for f in schema:
+        # 用 git diff 扫**加行**(而非 git show 全文):diff 对 diff 内文件永不失败 → 无 try/except → fail-fast 完整。
+        diff = sh(["git", "-c", "core.quotepath=false", "diff", rng, "--", f], cwd)
+        added = "\n".join(ln[1:] for ln in diff.splitlines()
+                          if ln.startswith("+") and not ln.startswith("+++"))
+        if is_irreversible_migration(added):
+            irreversible.append(f)
+    wip = [{"pr": p["pr"], "subjects": [s for s in p["subjects"] if has_wip_marker([s])]}
+           for p in pending if has_wip_marker(p["subjects"])]
     return {"schema_changes": schema, "big_prs": big,
-            "multi_author_files": multi[:15], "reverted_prs": reverted}
+            "multi_author_files": multi[:15], "reverted_prs": reverted,
+            "config_changes": config, "irreversible_migrations": irreversible, "wip_prs": wip}
 
 
-def collect_repo(name, path, now):
-    fetch(path)
-    pending = pending_prs(path)
-    return {"repo": name, "dev_head": dev_head(path),
-            "dev_ahead_main": int(sh(["git", "rev-list", "--count", "origin/main..origin/dev"], path) or 0),
-            "main_ahead_dev": int(sh(["git", "rev-list", "--count", "origin/dev..origin/main"], path) or 0),
-            "pending_merged_prs": pending, "reverse_commits": reverse_commits(path),
-            "open_prs_targeting_dev": open_prs(path, now), "risk": risk_scan(path, pending)}
+def collect_line(label, path, base, head, now):
+    # 一条发布线 = 一仓一对分支对比(base..head)。三条线:nine main..dev / nine recruit-agent/prod..dev /
+    # nine-recruit-api main..dev。
+    fetch(path, base, head)
+    pending = pending_prs(path, base, head)
+    hb = remote_branch(head)
+    return {"line": label, "base": base, "head": head, "head_sha": head_sha(path, head),
+            "dev_ahead_base": int(sh(["git", "rev-list", "--count", "%s..%s" % (base, head)], path) or 0),
+            "base_ahead_dev": int(sh(["git", "rev-list", "--count", "%s..%s" % (head, base)], path) or 0),
+            "base_stale_days": compute_days_stale(sh(["git", "log", "-1", "--format=%cI", base], path), now),
+            "pending_merged_prs": pending,
+            "reverse_commits": reverse_commits(path, base, head, hb),
+            "open_prs_targeting_dev": open_prs(path, head, now),
+            "risk": risk_scan(path, base, head, pending),
+            "branch_audit": branch_audit(path, base, now)}
 
 
 def main():
-    # 注:--repo 的 path 由调用方(定时任务 prompt)传入,约定用 ~/nanoclaw-worktrees/ 下路径。
+    # 注:--pair 的 path 由调用方(定时任务 prompt)传入,约定用 ~/nanoclaw-worktrees/ 下路径。
     # 本脚本不做路径 allowlist:它是通用只读 git 工具、subprocess 全 list 形式(无 shell 注入);
     # "只能走 guard-safe 路径" 由 host-guard(Bash 层拦 ~/Desktop/vibe-coding/)+ 任务 prompt 双重 enforce,不在此重复。
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", action="append", required=True, help="name=path,可多次")
+    ap.add_argument("--pair", action="append", required=True,
+                    help="label=path:base..head,可多次(一条发布线一个)")
     ap.add_argument("--out", default="-")
     a = ap.parse_args()
     now = datetime.now(timezone.utc)
-    repos = [collect_repo(*spec.split("=", 1), now) for spec in a.repo]
-    doc = {"schema": "devmain-digest/v1", "generated_at": now.isoformat(), "repos": repos}
+    lines = [collect_line(*parse_pair_arg(spec), now) for spec in a.pair]
+    doc = {"schema": "devmain-digest/v2", "generated_at": now.isoformat(), "lines": lines}
     txt = json.dumps(doc, ensure_ascii=False, indent=2)
     if a.out == "-":
         print(txt)
