@@ -1,0 +1,12 @@
+{
+  "_comment": "真 webhook 走环境变量 ISSUE_RADAR_WEBHOOK_URL，勿在此填真值",
+  "webhook_url_env": "ISSUE_RADAR_WEBHOOK_URL",
+  "ssh_host": "root@ssh-metal.heasenbug.com",
+  "container": "nine-backend",
+  "bitable": {
+    "_comment": "跟进台账多维表格：问题跟进（会话定时扫描）。bitable_sync 用 ISSUE_RADAR_BASE_TOKEN/ISSUE_RADAR_TABLE_ID 环境变量，或 --base-token/--table-id",
+    "base_token": "LFuFbiJ65ajEg3sofCScJ9wgnpf",
+    "table_id": "tblMpHuhUhpIM5ql",
+    "table_name": "问题跟进 （会话定时扫描）"
+  }
+}
