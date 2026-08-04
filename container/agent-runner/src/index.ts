@@ -1051,7 +1051,23 @@ interface ScriptResult {
   data?: unknown;
 }
 
-const SCRIPT_TIMEOUT_MS = 30_000;
+export const SCRIPT_TIMEOUT_MS = 90_000;
+
+export function scriptResultToOutput(
+  scriptResult: ScriptResult | null,
+): ContainerOutput | null {
+  if (!scriptResult) {
+    return {
+      status: 'error',
+      result: null,
+      error: 'Scheduled task script failed before producing a valid result',
+    };
+  }
+  if (!scriptResult.wakeAgent) {
+    return { status: 'success', result: null };
+  }
+  return null;
+}
 
 async function runScript(script: string): Promise<ScriptResult | null> {
   const scriptPath = '/tmp/task-script.sh';
@@ -1157,14 +1173,13 @@ async function main(): Promise<void> {
     const scriptResult = await runScript(containerInput.script);
 
     if (!scriptResult || !scriptResult.wakeAgent) {
-      const reason = scriptResult
-        ? 'wakeAgent=false'
-        : 'script error/no output';
-      log(`Script decided not to wake agent: ${reason}`);
-      writeOutput({
-        status: 'success',
-        result: null,
-      });
+      const scriptOutput = scriptResultToOutput(scriptResult)!;
+      log(
+        scriptOutput.status === 'error'
+          ? `Task script failed: ${scriptOutput.error}`
+          : 'Script decided not to wake agent: wakeAgent=false',
+      );
+      writeOutput(scriptOutput);
       return;
     }
 
