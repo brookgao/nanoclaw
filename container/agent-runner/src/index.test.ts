@@ -12,7 +12,36 @@ import {
   IdleCompactController,
   isDotaTrigger,
   messageToNotice,
+  SCRIPT_TIMEOUT_MS,
+  scriptResultToOutput,
 } from './index.js';
+
+describe('scheduled task script terminal output', () => {
+  it('turns a missing valid script result into an error', () => {
+    expect(scriptResultToOutput(null)).toEqual({
+      status: 'error',
+      result: null,
+      error: 'Scheduled task script failed before producing a valid result',
+    });
+  });
+
+  it('keeps an explicit wakeAgent=false result as IPC-only success', () => {
+    expect(scriptResultToOutput({ wakeAgent: false })).toEqual({
+      status: 'success',
+      result: null,
+    });
+  });
+
+  it('lets wakeAgent=true continue to the existing agent path', () => {
+    expect(
+      scriptResultToOutput({ wakeAgent: true, data: { digest: {} } }),
+    ).toBeNull();
+  });
+
+  it('allows Git-backed task scripts up to 90 seconds', () => {
+    expect(SCRIPT_TIMEOUT_MS).toBe(90_000);
+  });
+});
 
 describe('isDotaTrigger', () => {
   it('matches explicit DOTA trigger phrases', () => {
