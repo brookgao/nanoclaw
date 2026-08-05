@@ -34,6 +34,7 @@
 | `risk.wip_prs[]` | subject 含 WIP/临时标记的 PR——①变更风险 |
 | `risk.big_prs[]` / `risk.multi_author_files[]` / `risk.reverted_prs[]` | 超大 PR / 多人同改文件 / 本轮 revert（同 v1） |
 | `branch_audit.force_pushes[]` | base 分支的 force-push 事件；每条含 `actor/before/after/timestamp/days_ago`——⑥审计 |
+| `preflight`（仅 `nine`） | 134 测试与159生产的只读预检：`status/risk/ddl/production_tables/environment/requires_manual_confirmation`。只含表元数据和环境变量**键名**，绝不含变量值、密码或 DSN。|
 
 ## 二、归纳指令
 
@@ -63,6 +64,7 @@
 - 🔴 **不可逆迁移 [③/⑤]**：`risk.irreversible_migrations` → 「含 DROP/TRUNCATE，发坏退不回」+ 直接用该项 `authors` 归人。
 - 🟡 **schema 迁移 [①]**：`risk.schema_changes` → 「触发 DB 迁移，需 DBA 确认」+ 用该项 `authors` 归人。
 - 🟡 **配置变动 [④]**：`risk.config_changes` → 「动了部署/环境配置」+ 用该项 `authors` 归人 + 「注意同步 prod」。
+- **发布预检 [③/④]**：`preflight.status == "unverified"` 时写「134/159 未验证：<reason>，先人工确认，不能按已通过发布」；`preflight.risk` 为 `high` 或 `medium` 时逐条列 DDL 的表/风险原因、环境变量新增/删除/修改的**键名**和人工处理项；`low` 只写「预检无高风险项」，不覆盖其它风险。此字段只适用于 nine 主平台，不能套用到小招或 recruit-api。
 - 🟡 **超大 PR [①]**：`risk.big_prs` 逐条点名 + `authors` + `files` 说动了哪些模块。
 - 🟡 **多人同改 [①]**：`risk.multi_author_files` → 「<文件> 被 X/Y/Z 同改，回归」。
 - 🟡 **revert [①]**：`risk.reverted_prs` → 「本轮 revert 了什么（谁），确认已排除」。
