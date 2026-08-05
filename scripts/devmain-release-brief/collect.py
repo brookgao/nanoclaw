@@ -12,6 +12,7 @@
 """
 import argparse, json, re, subprocess, sys
 from datetime import datetime, timezone, timedelta
+from preflight import collect_nine_preflight
 
 CST = timezone(timedelta(hours=8))   # 北京时间;所有对外展示的时间统一转这个时区
 BIG_PR_LINES = 2000
@@ -381,16 +382,22 @@ def collect_line(label, path, base, head, now):
     fetch(path, base, head)
     pending = pending_prs(path, base, head)
     hb = remote_branch(head)
-    return {"line": label, "base": base, "head": head, "head_sha": head_sha(path, head),
-            "dev_ahead_base": int(sh(["git", "rev-list", "--count", "%s..%s" % (base, head)], path) or 0),
+    ahead = int(sh(["git", "rev-list", "--count", "%s..%s" % (base, head)], path) or 0)
+    risk = risk_scan(path, base, head, pending)
+    result = {"line": label, "base": base, "head": head, "head_sha": head_sha(path, head),
+            "dev_ahead_base": ahead,
             "base_ahead_dev": int(sh(["git", "rev-list", "--count", "%s..%s" % (head, base)], path) or 0),
             "base_stale_days": compute_days_stale(sh(["git", "log", "-1", "--format=%cI", base], path), now),
             "base_last_merge": last_merge(path, base),
             "pending_merged_prs": pending,
             "reverse_commits": reverse_commits(path, base, head, hb),
             "open_prs_targeting_dev": open_prs(path, head, now),
-            "risk": risk_scan(path, base, head, pending),
+            "risk": risk,
             "branch_audit": branch_audit(path, base, now)}
+    if label == "nine":
+        result["preflight"] = (collect_nine_preflight(path, base, head, risk) if ahead else
+                               {"status": "not_applicable", "risk": "low", "reason": "本线无待发布内容"})
+    return result
 
 
 def main():
